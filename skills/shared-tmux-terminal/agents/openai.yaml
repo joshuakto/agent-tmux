@@ -1,0 +1,4 @@
+interface:
+  display_name: "Shared Tmux Terminal"
+  short_description: "Launch and manage shared tmux sessions"
+  default_prompt: "Use $shared-tmux-terminal to launch a project-local tmux session, report its socket and panes, and manage multiple live sessions for human inspection."

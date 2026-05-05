@@ -1,0 +1,114 @@
+# agent-tmux
+
+Vendor-neutral tmux session manager for shared human-agent terminals.
+
+`agent-tmux` gives terminal agents a stable way to launch, inspect, attach to, interrupt, and manage project-local tmux sessions that humans can watch and interfere with live. It works with Claude Code, Codex, shell scripts, and other terminal agents because the shared interface is a normal CLI.
+
+## What It Provides
+
+- one project-local tmux server, usually at `.agent/tmux.sock`
+- multiple named sessions for agents, shells, dev servers, test watchers, and REPLs
+- a lightweight registry at `.agent/tmux.d/registry.json`
+- read/write controls through `send`, `read`, `keys`, `interrupt`, `split`, `join-pane`, and `move-window`
+- a dumb project wrapper at `.agent/tmux`
+- optional Codex skill metadata under `skills/shared-tmux-terminal`
+
+tmux still owns the live terminal state. `agent-tmux` is the control and reporting layer around it.
+
+## Install
+
+Clone the repo:
+
+```bash
+git clone https://github.com/joshuakto/agent-tmux ~/.agent-tmux
+```
+
+Install the CLI:
+
+```bash
+~/.agent-tmux/bin/agent-tmux install-bin
+```
+
+Install the per-project wrapper from inside a project:
+
+```bash
+agent-tmux install-wrapper
+```
+
+The wrapper is intentionally small. It forwards to `agent-tmux` and does not store state.
+
+## Usage
+
+```bash
+agent-tmux launch --session reviewer --purpose review --run "claude --name reviewer"
+agent-tmux report
+agent-tmux list
+agent-tmux status reviewer
+agent-tmux read reviewer --lines 120
+agent-tmux send reviewer "npm test"
+agent-tmux interrupt reviewer
+agent-tmux attach reviewer
+```
+
+With the project wrapper:
+
+```bash
+.agent/tmux report
+.agent/tmux attach reviewer
+```
+
+## Agent Instructions
+
+Give terminal agents this contract:
+
+```text
+Use agent-tmux for shared interactive terminal work.
+
+Launch a session with:
+agent-tmux launch --session <name> --purpose <purpose> --run "<command>"
+
+Report status with:
+agent-tmux report
+
+Read output with:
+agent-tmux read <session> --lines 120
+
+Send input with:
+agent-tmux send <session> "<text>"
+
+Interrupt stuck work with:
+agent-tmux interrupt <session>
+
+After every launch or layout change, report the session name, socket path, attach command, pane list, active pane, and a recent output sample.
+```
+
+The same text is available in `skills/shared-tmux-terminal/references/agent-contract.md`.
+
+## Codex Skill
+
+Install the Codex adapter with:
+
+```bash
+python ~/.codex/skills/.system/skill-installer/scripts/install-skill-from-github.py \
+  --repo joshuakto/agent-tmux \
+  --path skills/shared-tmux-terminal
+```
+
+Restart Codex after installing the skill.
+
+## Project State
+
+Commit:
+
+```text
+.agent/tmux
+```
+
+Ignore:
+
+```text
+.agent/tmux.sock
+.agent/tmux.d/
+```
+
+The socket and registry are runtime state. They should not be source-controlled.
