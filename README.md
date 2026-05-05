@@ -11,6 +11,7 @@ Vendor-neutral tmux session manager for shared human-agent terminals.
 - a lightweight registry at `.agent/tmux.d/registry.json`
 - read/write controls through `send`, `read`, `keys`, `interrupt`, `split`, `join-pane`, and `move-window`
 - a dumb project wrapper at `.agent/tmux`
+- Claude Code plugin metadata at `.claude-plugin/plugin.json`
 - optional Codex skill metadata under `skills/shared-tmux-terminal`
 
 tmux still owns the live terminal state. `agent-tmux` is the control and reporting layer around it.
@@ -83,6 +84,26 @@ After every launch or layout change, report the session name, socket path, attac
 ```
 
 The same text is available in `skills/shared-tmux-terminal/references/agent-contract.md`.
+
+## Claude Code Plugin
+
+Claude Code auto-discovers skills from personal skills, project skills, and installed plugins. This repository is also a Claude Code plugin: it has `.claude-plugin/plugin.json`, `skills/shared-tmux-terminal/SKILL.md`, and `bin/agent-tmux`.
+
+For local testing:
+
+```bash
+claude --plugin-dir ~/.agent-tmux
+```
+
+Inside Claude Code, the skill is available as:
+
+```text
+/agent-tmux:shared-tmux-terminal
+```
+
+Claude can also invoke it automatically when the request matches the skill description. The plugin `bin/` directory is added to Claude Code's Bash tool `PATH` while the plugin is enabled, so `agent-tmux` is available to the agent.
+
+For shared installation, add this repository as a Claude Code plugin marketplace or install it as a project/personal skill by copying `skills/shared-tmux-terminal` into `.claude/skills/` or `~/.claude/skills/`.
 
 ## Codex Skill
 
