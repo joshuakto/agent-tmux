@@ -40,6 +40,11 @@ When a project has a wrapper, prefer the shorter form:
 .agent/tmux report
 .agent/tmux send build-123 "npm test"
 .agent/tmux read build-123 --lines 120
+.agent/tmux read build-123 --all --number
+.agent/tmux search build-123 "error|failed" --ignore-case --context 3
+.agent/tmux wait build-123 "complete|failed" --ignore-case --timeout 120
+.agent/tmux prompt build-123 --agent claude "Report progress."
+.agent/tmux action build-123 submit --agent claude
 .agent/tmux interrupt build-123
 .agent/tmux attach build-123
 ```
@@ -52,7 +57,7 @@ agent-tmux install-wrapper
 
 The wrapper must stay dumb: it only resolves and forwards to `agent-tmux`.
 
-For Claude Code or other terminal agents, load `references/agent-contract.md` when you need a concise reusable instruction block.
+For Claude Code or other terminal agents, load `references/agent-contract.md` when you need a concise reusable instruction block. Load `references/agent-profiles.md` when you need profile-specific key behavior.
 
 ## Reporting Contract
 
@@ -74,6 +79,9 @@ Keep the report compact. The goal is to make it easy for a human to join and eas
 - Use stable, descriptive session names.
 - Treat the tmux session as shared state: humans may attach concurrently and change focus or input.
 - Use `send` for literal commands, `keys` for raw tmux key sequences, and `interrupt` for Ctrl-C.
+- Use `prompt` and `action` for terminal-agent UIs so text entry and submission are explicit and profile-aware.
+- Use `read --all`, `read --start`, `search`, `wait`, and `dump` before deciding an agent is stuck; the current viewport is often not enough.
+- Treat `--lines N` on `read`, `search`, `wait`, and `dump` as "last N captured lines"; use `--start`, `--end`, or `--all` for explicit tmux history slices.
 - If sessions need to be rearranged, use the helper script to move or join windows and panes rather than recreating them.
 - Commit `.agent/tmux` if a project wants the convenience command; do not commit `.agent/tmux.sock` or `.agent/tmux.d/`.
 

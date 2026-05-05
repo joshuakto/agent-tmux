@@ -46,7 +46,13 @@ agent-tmux report
 agent-tmux list
 agent-tmux status reviewer
 agent-tmux read reviewer --lines 120
+agent-tmux read reviewer --all --number
+agent-tmux search reviewer "error|failed" --ignore-case --context 3
+agent-tmux wait reviewer "tests passed|failed" --ignore-case --timeout 120
+agent-tmux dump reviewer --all
 agent-tmux send reviewer "npm test"
+agent-tmux prompt reviewer --agent claude "What is your current status?"
+agent-tmux action reviewer submit --agent claude
 agent-tmux interrupt reviewer
 agent-tmux attach reviewer
 ```
@@ -56,6 +62,45 @@ With the project wrapper:
 ```bash
 .agent/tmux report
 .agent/tmux attach reviewer
+```
+
+## Reading Past The Viewport
+
+The current tmux viewport is rarely enough for agent supervision. Use history-aware commands:
+
+```bash
+agent-tmux read reviewer --lines 500
+agent-tmux read reviewer --start -2000 --number
+agent-tmux read reviewer --all --number
+agent-tmux search reviewer "error|failed|stuck" --ignore-case --context 3
+agent-tmux wait reviewer "complete|failed|error" --ignore-case --timeout 120
+agent-tmux dump reviewer --all
+```
+
+`dump` writes a capture file under `.agent/tmux.d/dumps/` unless `--output` is provided.
+For `read`, `search`, `wait`, and `dump`, `--lines N` means the last N captured lines. Use `--start`, `--end`, or `--all` when you need an explicit tmux history slice.
+
+## Agent UI Interaction
+
+Use `prompt` for terminal agents, not raw `send`, when the target is an interactive agent UI:
+
+```bash
+agent-tmux prompt reviewer --agent claude "Summarize your progress and blockers."
+agent-tmux prompt reviewer --agent codex "Run the focused test and report the failure."
+agent-tmux prompt reviewer --agent gemini "Inspect the current pane history."
+```
+
+If text is already sitting in the UI, submit it explicitly:
+
+```bash
+agent-tmux action reviewer submit --agent claude
+```
+
+Inspect available profiles and actions:
+
+```bash
+agent-tmux profiles
+agent-tmux profiles --agent claude
 ```
 
 ## Agent Instructions
@@ -74,8 +119,20 @@ agent-tmux report
 Read output with:
 agent-tmux read <session> --lines 120
 
+Search deeper history with:
+agent-tmux search <session> "<pattern>" --context 3
+
+Wait for a progress signal with:
+agent-tmux wait <session> "<pattern>" --timeout 120
+
 Send input with:
 agent-tmux send <session> "<text>"
+
+Send a terminal-agent prompt with:
+agent-tmux prompt <session> --agent claude "<prompt>"
+
+Submit already-entered text with:
+agent-tmux action <session> submit --agent claude
 
 Interrupt stuck work with:
 agent-tmux interrupt <session>

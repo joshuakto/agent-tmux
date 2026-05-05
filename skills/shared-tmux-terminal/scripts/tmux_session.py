@@ -9,9 +9,58 @@ import os
 import re
 import shutil
 import subprocess
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+
+
+AGENT_PROFILES: dict[str, dict[str, Any]] = {
+    "generic": {
+        "aliases": ["shell", "bash", "zsh", "terminal"],
+        "actions": {
+            "submit": ["Enter"],
+            "interrupt": ["C-c"],
+            "eof": ["C-d"],
+            "escape": ["Escape"],
+            "clear": ["C-l"],
+        },
+        "notes": "Generic terminal profile. Use for shells, REPLs, and unknown terminal agents.",
+    },
+    "claude": {
+        "aliases": ["claude-code", "anthropic"],
+        "actions": {
+            "submit": ["Enter"],
+            "interrupt": ["C-c"],
+            "eof": ["C-d"],
+            "escape": ["Escape"],
+            "clear": ["C-l"],
+        },
+        "notes": "Claude Code profile. Use prompt to paste text and submit it as a user message.",
+    },
+    "codex": {
+        "aliases": ["openai", "codex-cli"],
+        "actions": {
+            "submit": ["Enter"],
+            "interrupt": ["C-c"],
+            "eof": ["C-d"],
+            "escape": ["Escape"],
+            "clear": ["C-l"],
+        },
+        "notes": "Codex CLI profile. Use prompt for user-message style input.",
+    },
+    "gemini": {
+        "aliases": ["gemini-cli", "google"],
+        "actions": {
+            "submit": ["Enter"],
+            "interrupt": ["C-c"],
+            "eof": ["C-d"],
+            "escape": ["Escape"],
+            "clear": ["C-l"],
+        },
+        "notes": "Gemini CLI profile. Use prompt for user-message style input.",
+    },
+}
 
 
 WRAPPER = """#!/usr/bin/env bash
@@ -105,9 +154,16 @@ def save_registry(path: Path, data: dict[str, Any]) -> None:
     tmp.replace(path)
 
 
-def run_tmux(socket: Path, args: list[str], *, capture: bool = False, check: bool = True) -> subprocess.CompletedProcess[str]:
+def run_tmux(
+    socket: Path,
+    args: list[str],
+    *,
+    capture: bool = False,
+    check: bool = True,
+    input_text: str | None = None,
+) -> subprocess.CompletedProcess[str]:
     cmd = ["tmux", "-S", str(socket), *args]
-    return subprocess.run(cmd, text=True, capture_output=capture, check=check)
+    return subprocess.run(cmd, text=True, input=input_text, capture_output=capture, check=check)
 
 
 def tmux_output(socket: Path, args: list[str]) -> str:
@@ -186,8 +242,73 @@ def list_panes(socket: Path, session: str) -> list[dict[str, Any]]:
     return panes
 
 
-def capture_pane(socket: Path, target: str, lines: int = 80) -> str:
-    return tmux_output(socket, ["capture-pane", "-t", target, "-p", "-S", f"-{lines}", "-J"])
+def capture_pane(
+    socket: Path,
+    target: str,
+    *,
+    lines: int = 80,
+    start: str | int | None = None,
+    end: str | int | None = None,
+    join: bool = True,
+    ansi: bool = False,
+) -> str:
+    cmd = ["capture-pane", "-t", target, "-p"]
+    if ansi:
+        cmd.append("-e")
+    if join:
+        cmd.append("-J")
+    if start is not None:
+        cmd.extend(["-S", str(start)])
+    else:
+        cmd.extend(["-S", f"-{lines}"])
+    if end is not None:
+        cmd.extend(["-E", str(end)])
+    output = tmux_output(socket, cmd)
+    if start is None and end is None and lines > 0:
+        return tail_lines(output, limit=lines)
+    return output
+
+
+def format_lines(text: str, *, number: bool = False, base: int = 1) -> str:
+    if not number:
+        return text
+    lines = text.splitlines()
+    width = max(4, len(str(base + len(lines))))
+    return "\n".join(f"{index:>{width}}  {line}" for index, line in enumerate(lines, base)) + ("\n" if text.endswith("\n") else "")
+
+
+def resolve_profile(name: str | None) -> tuple[str, dict[str, Any]]:
+    requested = (name or "generic").lower()
+    for profile_name, profile in AGENT_PROFILES.items():
+        aliases = [alias.lower() for alias in profile.get("aliases", [])]
+        if requested == profile_name or requested in aliases:
+            return profile_name, profile
+    known = ", ".join(sorted(AGENT_PROFILES))
+    raise SystemExit(f"Unknown agent profile: {name}. Known profiles: {known}")
+
+
+def target_for_args(socket: Path, session: str, pane: str | None) -> str:
+    if pane:
+        return pane
+    panes = list_panes(socket, session)
+    return active_pane_target(session, panes)
+
+
+def send_text(socket: Path, target: str, text: str) -> None:
+    if "\n" in text or len(text) > 500:
+        run_tmux(socket, ["load-buffer", "-b", "agent-tmux", "-"], input_text=text)
+        run_tmux(socket, ["paste-buffer", "-b", "agent-tmux", "-t", target, "-d"])
+        return
+    run_tmux(socket, ["send-keys", "-t", target, "-l", text])
+
+
+def send_profile_action(socket: Path, target: str, profile: dict[str, Any], action: str) -> None:
+    actions = profile.get("actions", {})
+    if action not in actions:
+        known = ", ".join(sorted(actions))
+        raise SystemExit(f"Unknown action: {action}. Known actions for this profile: {known}")
+    keys = actions[action]
+    run_tmux(socket, ["send-keys", "-t", target, *keys])
 
 
 def user_command(root: Path, args: str) -> str:
@@ -396,12 +517,8 @@ def status_cmd(args: argparse.Namespace) -> int:
 def send_cmd(args: argparse.Namespace) -> int:
     root = project_root(Path(args.cwd) if args.cwd else None)
     socket = socket_path(root, args.socket)
-    if args.pane:
-        target = args.pane
-    else:
-        panes = list_panes(socket, args.session)
-        target = active_pane_target(args.session, panes)
-    run_tmux(socket, ["send-keys", "-t", target, "-l", args.text])
+    target = target_for_args(socket, args.session, args.pane)
+    send_text(socket, target, args.text)
     if args.enter:
         run_tmux(socket, ["send-keys", "-t", target, "Enter"])
     return 0
@@ -419,7 +536,149 @@ def read_cmd(args: argparse.Namespace) -> int:
     root = project_root(Path(args.cwd) if args.cwd else None)
     socket = socket_path(root, args.socket)
     target = args.pane or args.session
-    print(capture_pane(socket, target, lines=args.lines), end="")
+    start: str | int | None
+    if args.all:
+        start = "-"
+    elif args.start is not None:
+        start = args.start
+    else:
+        start = None
+    output = capture_pane(
+        socket,
+        target,
+        lines=args.lines,
+        start=start,
+        end=args.end,
+        join=not args.no_join,
+        ansi=args.ansi,
+    )
+    formatted = format_lines(output, number=args.number)
+    print(formatted, end="")
+    if formatted and not formatted.endswith("\n"):
+        print()
+    return 0
+
+
+def dump_cmd(args: argparse.Namespace) -> int:
+    root = project_root(Path(args.cwd) if args.cwd else None)
+    socket = socket_path(root, args.socket)
+    target = args.pane or args.session
+    start: str | int | None = "-" if args.all else None
+    output = capture_pane(
+        socket,
+        target,
+        lines=args.lines,
+        start=start,
+        join=not args.no_join,
+        ansi=args.ansi,
+    )
+    output_path = Path(args.output).expanduser() if args.output else None
+    if output_path is None:
+        safe_target = slugify(target.replace(":", "-").replace(".", "-"))
+        timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+        output_path = root / ".agent" / "tmux.d" / "dumps" / f"{safe_target}-{timestamp}.txt"
+    if not output_path.is_absolute():
+        output_path = root / output_path
+    ensure_parent(output_path)
+    output_path.write_text(output)
+    print(output_path)
+    return 0
+
+
+def search_cmd(args: argparse.Namespace) -> int:
+    root = project_root(Path(args.cwd) if args.cwd else None)
+    socket = socket_path(root, args.socket)
+    flags = re.IGNORECASE if args.ignore_case else 0
+    pattern = re.compile(args.pattern, flags)
+    targets: list[str] = []
+    if args.all_panes:
+        for sess in list_sessions(socket):
+            for pane in list_panes(socket, sess["name"]):
+                targets.append(f"{sess['name']}:{pane['window_index']}.{pane['pane_index']}")
+    else:
+        if not args.pane and not args.session:
+            raise SystemExit("search requires a session, --pane, or --all-panes")
+        targets.append(args.pane or args.session)
+
+    any_match = False
+    for target in targets:
+        text = capture_pane(socket, target, lines=args.lines, start="-" if args.all else None)
+        lines = text.splitlines()
+        matches = [index for index, line in enumerate(lines) if pattern.search(line)]
+        if not matches:
+            continue
+        any_match = True
+        print(f"== {target} ==")
+        for match_index in matches[: args.max_matches]:
+            start = max(0, match_index - args.context)
+            end = min(len(lines), match_index + args.context + 1)
+            for index in range(start, end):
+                prefix = ">" if index == match_index else " "
+                print(f"{prefix} {index + 1:>5}  {lines[index]}")
+            print()
+    return 0 if any_match else 1
+
+
+def wait_cmd(args: argparse.Namespace) -> int:
+    root = project_root(Path(args.cwd) if args.cwd else None)
+    socket = socket_path(root, args.socket)
+    target = args.pane or args.session
+    flags = re.IGNORECASE if args.ignore_case else 0
+    pattern = re.compile(args.pattern, flags)
+    deadline = time.monotonic() + args.timeout
+    last_text = ""
+    while True:
+        last_text = capture_pane(socket, target, lines=args.lines)
+        if pattern.search(last_text):
+            if not args.quiet:
+                print(f"matched: {args.pattern}")
+                print(tail_lines(last_text, limit=args.tail))
+            return 0
+        if time.monotonic() >= deadline:
+            if not args.quiet:
+                print(f"timeout waiting for: {args.pattern}")
+                print(tail_lines(last_text, limit=args.tail))
+            return 1
+        time.sleep(args.interval)
+
+
+def prompt_cmd(args: argparse.Namespace) -> int:
+    root = project_root(Path(args.cwd) if args.cwd else None)
+    socket = socket_path(root, args.socket)
+    target = target_for_args(socket, args.session, args.pane)
+    profile_name, profile = resolve_profile(args.agent)
+    send_text(socket, target, args.text)
+    if args.submit:
+        send_profile_action(socket, target, profile, "submit")
+    if not args.quiet:
+        print(f"prompt sent: target={target} profile={profile_name} submitted={'yes' if args.submit else 'no'}")
+    return 0
+
+
+def action_cmd(args: argparse.Namespace) -> int:
+    root = project_root(Path(args.cwd) if args.cwd else None)
+    socket = socket_path(root, args.socket)
+    target = target_for_args(socket, args.session, args.pane)
+    profile_name, profile = resolve_profile(args.agent)
+    send_profile_action(socket, target, profile, args.action)
+    if not args.quiet:
+        print(f"action sent: target={target} profile={profile_name} action={args.action}")
+    return 0
+
+
+def profiles_cmd(args: argparse.Namespace) -> int:
+    if args.agent:
+        profile_name, profile = resolve_profile(args.agent)
+        print(f"{profile_name}")
+        print(f"  aliases: {', '.join(profile.get('aliases', []))}")
+        print(f"  actions: {', '.join(sorted(profile.get('actions', {})))}")
+        print(f"  notes: {profile.get('notes', '')}")
+        for action, keys in sorted(profile.get("actions", {}).items()):
+            print(f"    {action}: {' '.join(keys)}")
+        return 0
+    for profile_name, profile in sorted(AGENT_PROFILES.items()):
+        aliases = ", ".join(profile.get("aliases", []))
+        print(f"{profile_name}: actions={', '.join(sorted(profile.get('actions', {})))} aliases={aliases}")
     return 0
 
 
@@ -560,8 +819,69 @@ def parser() -> argparse.ArgumentParser:
     read = command("read", help="Capture pane history")
     read.add_argument("session")
     read.add_argument("--pane", help="Explicit pane target, e.g. session:0.0")
-    read.add_argument("--lines", type=int, default=200)
+    read.add_argument("--lines", type=int, default=200, help="Tail this many captured lines unless --start or --all is used")
+    read.add_argument("--start", help="tmux capture-pane start line for explicit history slices, e.g. -500 or 0")
+    read.add_argument("--end", help="tmux capture-pane end line")
+    read.add_argument("--all", action="store_true", help="Capture full available history")
+    read.add_argument("--no-join", action="store_true", help="Do not join wrapped lines")
+    read.add_argument("--ansi", action="store_true", help="Preserve ANSI escape sequences")
+    read.add_argument("--number", action="store_true", help="Prefix captured lines with line numbers")
     read.set_defaults(func=read_cmd)
+
+    dump = command("dump", help="Write pane history to a file")
+    dump.add_argument("session")
+    dump.add_argument("--pane", help="Explicit pane target, e.g. session:0.0")
+    dump.add_argument("--lines", type=int, default=2000, help="Tail this many captured lines unless --all is used")
+    dump.add_argument("--all", action="store_true", help="Dump full available history")
+    dump.add_argument("--no-join", action="store_true", help="Do not join wrapped lines")
+    dump.add_argument("--ansi", action="store_true", help="Preserve ANSI escape sequences")
+    dump.add_argument("--output", help="Output file path; defaults under .agent/tmux.d/dumps/")
+    dump.set_defaults(func=dump_cmd)
+
+    search = command("search", help="Search pane history")
+    search.add_argument("session", nargs="?", help="Session or target to search")
+    search.add_argument("pattern")
+    search.add_argument("--pane", help="Explicit pane target, e.g. session:0.0")
+    search.add_argument("--all-panes", action="store_true", help="Search all panes in the project tmux server")
+    search.add_argument("--all", action="store_true", help="Search full available history")
+    search.add_argument("--lines", type=int, default=5000, help="Tail this many captured lines unless --all is used")
+    search.add_argument("--context", type=int, default=2)
+    search.add_argument("--max-matches", type=int, default=20)
+    search.add_argument("--ignore-case", action="store_true")
+    search.set_defaults(func=search_cmd)
+
+    wait = command("wait", help="Wait until pane history matches a pattern")
+    wait.add_argument("session")
+    wait.add_argument("pattern")
+    wait.add_argument("--pane", help="Explicit pane target, e.g. session:0.0")
+    wait.add_argument("--lines", type=int, default=500, help="Tail this many captured lines on each poll")
+    wait.add_argument("--timeout", type=float, default=30.0)
+    wait.add_argument("--interval", type=float, default=1.0)
+    wait.add_argument("--tail", type=int, default=12, help="Lines to print when done")
+    wait.add_argument("--ignore-case", action="store_true")
+    wait.add_argument("--quiet", action="store_true")
+    wait.set_defaults(func=wait_cmd)
+
+    prompt = command("prompt", help="Send text to a terminal agent and submit using an agent profile")
+    prompt.add_argument("session")
+    prompt.add_argument("text")
+    prompt.add_argument("--pane", help="Explicit pane target, e.g. session:0.0")
+    prompt.add_argument("--agent", default="generic", help="Agent profile: claude, codex, gemini, generic")
+    prompt.add_argument("--no-submit", dest="submit", action="store_false", help="Paste text but do not submit")
+    prompt.add_argument("--quiet", action="store_true")
+    prompt.set_defaults(func=prompt_cmd, submit=True)
+
+    action = command("action", help="Send a named action from an agent profile")
+    action.add_argument("session")
+    action.add_argument("action", help="Profile action, e.g. submit, interrupt, eof, escape, clear")
+    action.add_argument("--pane", help="Explicit pane target, e.g. session:0.0")
+    action.add_argument("--agent", default="generic", help="Agent profile: claude, codex, gemini, generic")
+    action.add_argument("--quiet", action="store_true")
+    action.set_defaults(func=action_cmd)
+
+    profiles = command("profiles", help="List terminal-agent interaction profiles")
+    profiles.add_argument("--agent", help="Show one profile")
+    profiles.set_defaults(func=profiles_cmd)
 
     attach = command("attach", help="Attach to a session")
     attach.add_argument("session")

@@ -1,0 +1,49 @@
+# Agent Profiles
+
+Agent profiles map common terminal-agent actions to tmux key sequences. They are intentionally conservative: they cover submission, interruption, exit, escape, and clear-screen actions. They do not auto-approve edits or permissions.
+
+## Profiles
+
+```bash
+agent-tmux profiles
+agent-tmux profiles --agent claude
+agent-tmux profiles --agent codex
+agent-tmux profiles --agent gemini
+agent-tmux profiles --agent generic
+```
+
+## Interaction Pattern
+
+Use `prompt` when you want to send a user message to a terminal agent:
+
+```bash
+agent-tmux prompt reviewer --agent claude "Summarize current status."
+```
+
+Use `action` when text is already present in the terminal UI or when you need a non-text key:
+
+```bash
+agent-tmux action reviewer submit --agent claude
+agent-tmux action reviewer interrupt --agent claude
+agent-tmux action reviewer escape --agent claude
+```
+
+Use raw keys only when the profile action does not exist:
+
+```bash
+agent-tmux keys reviewer Tab Enter
+```
+
+## Current Conservative Defaults
+
+All built-in profiles currently share these stable actions:
+
+```text
+submit: Enter
+interrupt: C-c
+eof: C-d
+escape: Escape
+clear: C-l
+```
+
+Profiles are still valuable because they provide one place to document and change vendor-specific interaction behavior later.
