@@ -9,6 +9,8 @@ Vendor-neutral tmux session manager for shared human-agent terminals.
 - one project-local tmux server, usually at `.agent/tmux.sock`
 - multiple named sessions for agents, shells, dev servers, test watchers, and REPLs
 - a lightweight registry at `.agent/tmux.d/registry.json`
+- diagnostics under `.agent/tmux.d/doctor/events.jsonl`
+- optional pane transcripts under `.agent/tmux.d/logs/`
 - read/write controls through `send`, `read`, `keys`, `interrupt`, `split`, `join-pane`, and `move-window`
 - a dumb project wrapper at `.agent/tmux`
 - Claude Code plugin metadata at `.claude-plugin/plugin.json`
@@ -41,10 +43,12 @@ The wrapper is intentionally small. It forwards to `agent-tmux` and does not sto
 ## Usage
 
 ```bash
-agent-tmux launch --session reviewer --purpose review --run "claude --name reviewer"
+agent-tmux launch --session reviewer --purpose review --run "claude --name reviewer" --log
 agent-tmux report
 agent-tmux list
+agent-tmux doctor
 agent-tmux status reviewer
+agent-tmux log status reviewer
 agent-tmux read reviewer --lines 120
 agent-tmux read reviewer --all --number
 agent-tmux search reviewer "error|failed" --ignore-case --context 3
@@ -80,6 +84,31 @@ agent-tmux dump reviewer --all
 `dump` writes a capture file under `.agent/tmux.d/dumps/` unless `--output` is provided.
 For `read`, `search`, `wait`, and `dump`, `--lines N` means the last N captured lines. Use `--start`, `--end`, or `--all` when you need an explicit tmux history slice.
 
+## Diagnostics And Logs
+
+Run commands from the project root, or pass `--cwd /path/to/project`. This matters because the default socket is project-local.
+
+Use `doctor` when a human can see sessions that the agent cannot, when a socket error appears, or when registry state and live tmux state disagree:
+
+```bash
+agent-tmux --cwd /path/to/project doctor \
+  --question "why did list not show the session?" \
+  --context "human can see claude-p113 attached in Zed"
+```
+
+`doctor` reports the resolved root, socket, registry, live sessions, and mismatches. It also appends structured JSONL events to `.agent/tmux.d/doctor/events.jsonl` so tool failures can be reviewed later without turning runtime status into a second source of truth.
+
+For durable terminal history, start transcript logging:
+
+```bash
+agent-tmux launch --session reviewer --purpose review --run "claude --name reviewer" --log
+agent-tmux log start reviewer
+agent-tmux log status reviewer
+agent-tmux log stop reviewer
+```
+
+Logs are written under `.agent/tmux.d/logs/` by default. They are raw terminal transcripts and may contain ANSI escape codes.
+
 ## Agent UI Interaction
 
 Use `prompt` for terminal agents, not raw `send`, when the target is an interactive agent UI:
@@ -109,12 +138,16 @@ Give terminal agents this contract:
 
 ```text
 Use agent-tmux for shared interactive terminal work.
+Run it from the project root, or pass --cwd /path/to/project.
 
 Launch a session with:
-agent-tmux launch --session <name> --purpose <purpose> --run "<command>"
+agent-tmux launch --session <name> --purpose <purpose> --run "<command>" --log
 
 Report status with:
 agent-tmux report
+
+If a session seems missing or socket access fails, diagnose with:
+agent-tmux doctor --question "<what looked wrong>" --context "<what you were doing>"
 
 Read output with:
 agent-tmux read <session> --lines 120
@@ -189,4 +222,4 @@ Ignore:
 .agent/tmux.d/
 ```
 
-The socket and registry are runtime state. They should not be source-controlled.
+The socket, registry, doctor events, dumps, and transcripts are runtime state. They should not be source-controlled.

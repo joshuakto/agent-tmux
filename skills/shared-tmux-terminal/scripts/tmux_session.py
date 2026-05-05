@@ -7,8 +7,10 @@ import argparse
 import json
 import os
 import re
+import shlex
 import shutil
 import subprocess
+import sys
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -125,6 +127,14 @@ def registry_path(root: Path) -> Path:
     return root / ".agent" / "tmux.d" / "registry.json"
 
 
+def doctor_log_path(root: Path) -> Path:
+    return root / ".agent" / "tmux.d" / "doctor" / "events.jsonl"
+
+
+def transcript_dir(root: Path) -> Path:
+    return root / ".agent" / "tmux.d" / "logs"
+
+
 def ensure_parent(path: Path) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -154,6 +164,24 @@ def save_registry(path: Path, data: dict[str, Any]) -> None:
     tmp.replace(path)
 
 
+class TmuxError(RuntimeError):
+    def __init__(self, cmd: list[str], returncode: int, stdout: str, stderr: str):
+        self.cmd = cmd
+        self.returncode = returncode
+        self.stdout = stdout
+        self.stderr = stderr
+        super().__init__(self.message)
+
+    @property
+    def output(self) -> str:
+        return (self.stdout or "") + (self.stderr or "")
+
+    @property
+    def message(self) -> str:
+        output = self.output.strip()
+        return output or f"tmux exited with status {self.returncode}"
+
+
 def run_tmux(
     socket: Path,
     args: list[str],
@@ -163,34 +191,85 @@ def run_tmux(
     input_text: str | None = None,
 ) -> subprocess.CompletedProcess[str]:
     cmd = ["tmux", "-S", str(socket), *args]
-    return subprocess.run(cmd, text=True, input=input_text, capture_output=capture, check=check)
+    result = subprocess.run(cmd, text=True, input=input_text, capture_output=capture or check, check=False)
+    if check and result.returncode != 0:
+        raise TmuxError(cmd, result.returncode, result.stdout or "", result.stderr or "")
+    return result
 
 
 def tmux_output(socket: Path, args: list[str]) -> str:
+    result = run_tmux(socket, args, capture=True, check=False)
+    if result.returncode != 0:
+        raise TmuxError(["tmux", "-S", str(socket), *args], result.returncode, result.stdout or "", result.stderr or "")
+    return result.stdout
+
+
+def try_tmux(socket: Path, args: list[str]) -> dict[str, Any]:
+    cmd = ["tmux", "-S", str(socket), *args]
     try:
-        result = run_tmux(socket, args, capture=True)
-        return result.stdout
-    except subprocess.CalledProcessError as exc:
-        return (exc.stdout or "") + (exc.stderr or "")
+        result = subprocess.run(cmd, text=True, capture_output=True, check=False)
+    except OSError as exc:
+        return {
+            "cmd": cmd,
+            "returncode": 127,
+            "stdout": "",
+            "stderr": str(exc),
+            "ok": False,
+        }
+    return {
+        "cmd": cmd,
+        "returncode": result.returncode,
+        "stdout": result.stdout or "",
+        "stderr": result.stderr or "",
+        "ok": result.returncode == 0,
+    }
+
+
+def classify_tmux_failure(socket: Path, message: str) -> str:
+    text = message.lower()
+    if "operation not permitted" in text or "permission denied" in text:
+        return "permission-denied"
+    if "no such file or directory" in text:
+        return "socket-missing" if not socket.exists() else "stale-socket"
+    if "no server running" in text:
+        return "no-server"
+    if "error connecting" in text:
+        return "connection-error"
+    if "can't find session" in text:
+        return "session-not-found"
+    return "tmux-error"
+
+
+def print_tmux_error(root: Path, socket: Path, exc: TmuxError, *, context: str) -> None:
+    kind = classify_tmux_failure(socket, exc.message)
+    print(f"tmux {context} failed: {kind}", file=sys.stderr)
+    print(f"socket: {socket}", file=sys.stderr)
+    print(f"error: {exc.message}", file=sys.stderr)
+    print(f"diagnose: {user_command(root, 'doctor')}", file=sys.stderr)
+
+
+def append_doctor_event(root: Path, event: dict[str, Any]) -> Path:
+    path = doctor_log_path(root)
+    ensure_parent(path)
+    with path.open("a") as handle:
+        handle.write(json.dumps({"schema_version": 1, "timestamp": now_iso(), **event}, sort_keys=True) + "\n")
+    return path
 
 
 def session_exists(socket: Path, session: str) -> bool:
     try:
         run_tmux(socket, ["has-session", "-t", session], capture=True)
         return True
-    except subprocess.CalledProcessError:
+    except TmuxError:
         return False
 
 
 def list_sessions(socket: Path) -> list[dict[str, Any]]:
-    try:
-        out = tmux_output(socket, [
-            "list-sessions",
-            "-F",
-            "#{session_name}\t#{session_windows}\t#{session_attached}\t#{session_created}\t#{session_id}",
-        ])
-    except Exception:
-        return []
+    out = tmux_output(socket, [
+        "list-sessions",
+        "-F",
+        "#{session_name}\t#{session_windows}\t#{session_attached}\t#{session_created}\t#{session_id}",
+    ])
     sessions = []
     for line in out.splitlines():
         if not line.strip():
@@ -217,7 +296,7 @@ def list_panes(socket: Path, session: str) -> list[dict[str, Any]]:
         "-t",
         session,
         "-F",
-        "#{session_name}\t#{window_index}\t#{pane_index}\t#{pane_id}\t#{pane_active}\t#{pane_current_command}\t#{pane_title}\t#{pane_pid}",
+        "#{session_name}\t#{window_index}\t#{pane_index}\t#{pane_id}\t#{pane_active}\t#{pane_current_command}\t#{pane_title}\t#{pane_pid}\t#{pane_current_path}\t#{pane_pipe}",
     ])
     panes = []
     for line in out.splitlines():
@@ -227,6 +306,8 @@ def list_panes(socket: Path, session: str) -> list[dict[str, Any]]:
         if len(parts) < 8:
             continue
         session_name, window_index, pane_index, pane_id, active, command, title, pid = parts[:8]
+        current_path = parts[8] if len(parts) > 8 else ""
+        pane_pipe = parts[9] if len(parts) > 9 else ""
         panes.append(
             {
                 "session_name": session_name,
@@ -237,6 +318,8 @@ def list_panes(socket: Path, session: str) -> list[dict[str, Any]]:
                 "command": command,
                 "title": title,
                 "pid": pid,
+                "current_path": current_path,
+                "pipe": pane_pipe == "1",
             }
         )
     return panes
@@ -333,6 +416,37 @@ def active_pane_target(session: str, panes: list[dict[str, Any]]) -> str:
     return f"{session}:0.0"
 
 
+def session_name_from_target(session: str, target: str) -> str:
+    if ":" in target:
+        return target.split(":", 1)[0]
+    return session
+
+
+def default_log_file(root: Path, target: str) -> Path:
+    safe_target = slugify(target.replace(":", "-").replace(".", "-"))
+    timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+    return transcript_dir(root) / f"{safe_target}-{timestamp}.log"
+
+
+def start_transcript(socket: Path, target: str, output_path: Path) -> None:
+    ensure_parent(output_path)
+    command = f"cat >> {shlex.quote(str(output_path))}"
+    run_tmux(socket, ["pipe-pane", "-o", "-t", target, command])
+
+
+def stop_transcript(socket: Path, target: str) -> None:
+    run_tmux(socket, ["pipe-pane", "-t", target])
+
+
+def update_log_registry(registry: dict[str, Any], session: str, target: str, data: dict[str, Any]) -> None:
+    sessions = registry.setdefault("sessions", {})
+    entry = sessions.setdefault(session, {})
+    logs = entry.setdefault("logs", {})
+    pane_log = logs.setdefault(target, {})
+    pane_log.update(data)
+    entry["last_seen_at"] = now_iso()
+
+
 def print_report(root: Path, socket: Path, registry: dict[str, Any], *, lines: int = 60) -> None:
     sessions = list_sessions(socket)
     registry_sessions = registry.get("sessions", {})
@@ -363,10 +477,13 @@ def print_report(root: Path, socket: Path, registry: dict[str, Any], *, lines: i
         for pane in panes:
             marker = "*" if pane["active"] else " "
             target = f"{name}:{pane['window_index']}.{pane['pane_index']}"
+            pane_log = reg.get("logs", {}).get(target, {})
             print(
                 f"    {marker} {target} {pane['pane_id']} {pane['command']} "
-                f'"{pane["title"]}" pid={pane["pid"]}'
+                f'"{pane["title"]}" pid={pane["pid"]} pipe={"yes" if pane.get("pipe") else "no"}'
             )
+            if pane_log.get("path"):
+                print(f"      log: {pane_log['path']}")
             sample = tail_lines(capture_pane(socket, target, lines=lines), limit=8)
             if sample.strip():
                 for line in sample.splitlines():
@@ -418,9 +535,26 @@ def launch(args: argparse.Namespace) -> int:
         run_tmux(socket, ["new-session", "-Ad", "-s", session, "-c", str(root)])
         mode = "started"
 
+    log_path: Path | None = None
+    if args.log:
+        target = active_pane_target(session, list_panes(socket, session))
+        log_path = Path(args.log_output).expanduser() if args.log_output else default_log_file(root, target)
+        if not log_path.is_absolute():
+            log_path = root / log_path
+        start_transcript(socket, target, log_path)
+        update_log_registry(
+            registry,
+            session,
+            target,
+            {"path": str(log_path), "started_at": now_iso(), "stopped_at": None},
+        )
+
     if args.run:
-        run_tmux(socket, ["send-keys", "-t", session, "-l", args.run])
-        run_tmux(socket, ["send-keys", "-t", session, "Enter"])
+        if mode == "started" and args.run_delay > 0:
+            time.sleep(args.run_delay)
+        target = active_pane_target(session, list_panes(socket, session))
+        send_text(socket, target, args.run)
+        run_tmux(socket, ["send-keys", "-t", target, "Enter"])
 
     update_registry_entry(
         registry,
@@ -440,6 +574,8 @@ def launch(args: argparse.Namespace) -> int:
     print(f"tmux attach: tmux -S {socket} attach -t {session}")
     print(f"cwd: {root}")
     print(f"registry: {registry_file}")
+    if log_path:
+        print(f"log: {log_path}")
     print(f"windows: {len({pane['window_index'] for pane in panes})}  panes: {len(panes)}")
     for pane in panes:
         marker = "*" if pane["active"] else " "
@@ -459,6 +595,17 @@ def list_cmd(args: argparse.Namespace) -> int:
     socket = socket_path(root, args.socket)
     registry_file = registry_path(root)
     registry = load_registry(registry_file)
+    if not socket.exists():
+        registry_sessions = sorted((registry.get("sessions") or {}).keys())
+        if registry_sessions:
+            print(f"Project tmux socket is missing but registry has sessions at {registry_file}:")
+            for name in registry_sessions:
+                print(f"- {name}")
+            print(f"Run {user_command(root, 'doctor')} to diagnose stale registry/socket state.")
+            return 1
+        print(f"No project tmux socket found at {socket}")
+        print(f"Start one with {user_command(root, 'launch --purpose <purpose>')}")
+        return 0
     sessions = list_sessions(socket)
     if not sessions:
         print(f"No live tmux sessions found at {socket}")
@@ -481,6 +628,12 @@ def report_cmd(args: argparse.Namespace) -> int:
     root = project_root(Path(args.cwd) if args.cwd else None)
     socket = socket_path(root, args.socket)
     registry = load_registry(registry_path(root))
+    if not socket.exists() and not (registry.get("sessions") or {}):
+        print(f"Project root: {root}")
+        print(f"Socket: {socket} (missing)")
+        print("Live sessions: 0")
+        print(f"Start one with {user_command(root, 'launch --purpose <purpose>')}")
+        return 0
     print_report(root, socket, registry, lines=args.lines)
     return 0
 
@@ -490,6 +643,13 @@ def status_cmd(args: argparse.Namespace) -> int:
     socket = socket_path(root, args.socket)
     registry = load_registry(registry_path(root))
     session = args.session
+    probe = try_tmux(socket, ["has-session", "-t", session])
+    if not probe["ok"]:
+        message = (probe["stdout"] + probe["stderr"]).strip()
+        if classify_tmux_failure(socket, message) == "session-not-found":
+            print(f"Session not found: {session}")
+            return 1
+        raise TmuxError(probe["cmd"], probe["returncode"], probe["stdout"], probe["stderr"])
     if not session_exists(socket, session):
         print(f"Session not found: {session}")
         return 1
@@ -506,7 +666,10 @@ def status_cmd(args: argparse.Namespace) -> int:
     for pane in panes:
         marker = "*" if pane["active"] else " "
         target = f"{session}:{pane['window_index']}.{pane['pane_index']}"
-        print(f"{marker} {target} {pane['pane_id']} {pane['command']} \"{pane['title']}\"")
+        pane_log = reg.get("logs", {}).get(target, {})
+        print(f"{marker} {target} {pane['pane_id']} {pane['command']} \"{pane['title']}\" pipe={'yes' if pane.get('pipe') else 'no'}")
+        if pane_log.get("path"):
+            print(f"    log: {pane_log['path']}")
         sample = tail_lines(capture_pane(socket, target, lines=args.lines), limit=8)
         if sample.strip():
             for line in sample.splitlines():
@@ -588,7 +751,7 @@ def dump_cmd(args: argparse.Namespace) -> int:
 def search_cmd(args: argparse.Namespace) -> int:
     root = project_root(Path(args.cwd) if args.cwd else None)
     socket = socket_path(root, args.socket)
-    flags = re.IGNORECASE if args.ignore_case else 0
+    flags = re.MULTILINE | (re.IGNORECASE if args.ignore_case else 0)
     pattern = re.compile(args.pattern, flags)
     targets: list[str] = []
     if args.all_panes:
@@ -623,7 +786,7 @@ def wait_cmd(args: argparse.Namespace) -> int:
     root = project_root(Path(args.cwd) if args.cwd else None)
     socket = socket_path(root, args.socket)
     target = args.pane or args.session
-    flags = re.IGNORECASE if args.ignore_case else 0
+    flags = re.MULTILINE | (re.IGNORECASE if args.ignore_case else 0)
     pattern = re.compile(args.pattern, flags)
     deadline = time.monotonic() + args.timeout
     last_text = ""
@@ -680,6 +843,149 @@ def profiles_cmd(args: argparse.Namespace) -> int:
         aliases = ", ".join(profile.get("aliases", []))
         print(f"{profile_name}: actions={', '.join(sorted(profile.get('actions', {})))} aliases={aliases}")
     return 0
+
+
+def log_cmd(args: argparse.Namespace) -> int:
+    root = project_root(Path(args.cwd) if args.cwd else None)
+    socket = socket_path(root, args.socket)
+    registry_file = registry_path(root)
+    registry = load_registry(registry_file)
+    target = target_for_args(socket, args.session, getattr(args, "pane", None))
+    session = session_name_from_target(args.session, target)
+
+    if args.log_action == "start":
+        output_path = Path(args.output).expanduser() if args.output else default_log_file(root, target)
+        if not output_path.is_absolute():
+            output_path = root / output_path
+        start_transcript(socket, target, output_path)
+        update_log_registry(
+            registry,
+            session,
+            target,
+            {"path": str(output_path), "started_at": now_iso(), "stopped_at": None},
+        )
+        save_registry(registry_file, registry)
+        print(f"log started: {target}")
+        print(output_path)
+        return 0
+
+    if args.log_action == "stop":
+        stop_transcript(socket, target)
+        update_log_registry(registry, session, target, {"stopped_at": now_iso()})
+        save_registry(registry_file, registry)
+        print(f"log stopped: {target}")
+        return 0
+
+    panes = list_panes(socket, session)
+    reg = registry.get("sessions", {}).get(session, {})
+    print(f"Session: {session}")
+    for pane in panes:
+        pane_target = f"{session}:{pane['window_index']}.{pane['pane_index']}"
+        if args.pane and pane_target != args.pane:
+            continue
+        pane_log = reg.get("logs", {}).get(pane_target, {})
+        print(f"- {pane_target} pipe={'yes' if pane.get('pipe') else 'no'}")
+        if pane_log.get("path"):
+            print(f"  log: {pane_log['path']}")
+            if pane_log.get("started_at"):
+                print(f"  started_at: {pane_log['started_at']}")
+            if pane_log.get("stopped_at"):
+                print(f"  stopped_at: {pane_log['stopped_at']}")
+    return 0
+
+
+def doctor_cmd(args: argparse.Namespace) -> int:
+    root = project_root(Path(args.cwd) if args.cwd else None)
+    socket = socket_path(root, args.socket)
+    registry_file = registry_path(root)
+    registry: dict[str, Any] = {}
+    registry_error = None
+    try:
+        registry = load_registry(registry_file)
+    except Exception as exc:
+        registry_error = str(exc)
+
+    registry_sessions = sorted((registry.get("sessions") or {}).keys())
+    probe = try_tmux(socket, [
+        "list-sessions",
+        "-F",
+        "#{session_name}\t#{session_windows}\t#{session_attached}\t#{session_created}\t#{session_id}",
+    ])
+    live_sessions: list[dict[str, Any]] = []
+    issues: list[str] = []
+    if probe["ok"]:
+        for line in probe["stdout"].splitlines():
+            if not line.strip():
+                continue
+            parts = line.split("\t")
+            live_sessions.append({"name": parts[0], "raw": line})
+    else:
+        message = (probe["stdout"] + probe["stderr"]).strip()
+        issues.append(classify_tmux_failure(socket, message))
+
+    live_names = sorted(session["name"] for session in live_sessions)
+    missing_live = [name for name in registry_sessions if name not in live_names]
+    unregistered_live = [name for name in live_names if name not in registry_sessions]
+    if registry_error:
+        issues.append("registry-unreadable")
+    if registry.get("project_root") and Path(registry["project_root"]) != root:
+        issues.append("registry-project-root-mismatch")
+    if registry.get("socket") and Path(registry["socket"]) != socket:
+        issues.append("registry-socket-mismatch")
+    if missing_live:
+        issues.append("registered-session-not-live")
+    if unregistered_live:
+        issues.append("live-session-not-registered")
+    if not socket.exists() and registry_sessions:
+        issues.append("missing-socket-with-registered-sessions")
+    if not issues and live_sessions:
+        issues.append("ok-live-sessions")
+    elif not issues:
+        issues.append("ok-no-live-sessions")
+
+    event = {
+        "tool": "agent-tmux",
+        "command": "doctor",
+        "question": args.question,
+        "context": args.context,
+        "cwd": str(Path.cwd()),
+        "resolved_project_root": str(root),
+        "socket": str(socket),
+        "socket_exists": socket.exists(),
+        "registry_path": str(registry_file),
+        "registry_exists": registry_file.exists(),
+        "registry_error": registry_error,
+        "registry_sessions": registry_sessions,
+        "live_sessions": live_names,
+        "missing_live": missing_live,
+        "unregistered_live": unregistered_live,
+        "issues": issues,
+        "tmux_probe": probe,
+    }
+    log_path = None if args.no_log else append_doctor_event(root, event)
+
+    print(f"Project root: {root}")
+    print(f"Current directory: {Path.cwd()}")
+    print(f"Socket: {socket} ({'exists' if socket.exists() else 'missing'})")
+    print(f"Registry: {registry_file} ({'exists' if registry_file.exists() else 'missing'})")
+    if registry_error:
+        print(f"Registry error: {registry_error}")
+    print(f"Registry sessions: {', '.join(registry_sessions) if registry_sessions else '(none)'}")
+    if probe["ok"]:
+        print(f"Live sessions: {', '.join(live_names) if live_names else '(none)'}")
+    else:
+        message = (probe["stdout"] + probe["stderr"]).strip()
+        print(f"tmux probe failed: {classify_tmux_failure(socket, message)}")
+        if message:
+            print(f"tmux error: {message}")
+    if missing_live:
+        print(f"Registered but not live: {', '.join(missing_live)}")
+    if unregistered_live:
+        print(f"Live but not registered: {', '.join(unregistered_live)}")
+    print(f"Issues: {', '.join(issues)}")
+    if args.show_log_path and log_path:
+        print(f"Doctor event log: {log_path}")
+    return 0 if all(issue.startswith("ok-") for issue in issues) else 1
 
 
 def attach_cmd(args: argparse.Namespace) -> int:
@@ -788,6 +1094,9 @@ def parser() -> argparse.ArgumentParser:
     launch_cmd.add_argument("--session", help="Session name to create or reuse")
     launch_cmd.add_argument("--purpose", help="Short purpose label stored in the registry")
     launch_cmd.add_argument("--run", help="Literal command to send after launch")
+    launch_cmd.add_argument("--run-delay", type=float, default=0.5, help="Seconds to wait before sending --run to a newly started shell")
+    launch_cmd.add_argument("--log", action="store_true", help="Start transcript logging for the active pane")
+    launch_cmd.add_argument("--log-output", help="Transcript path; defaults under .agent/tmux.d/logs/")
     launch_cmd.add_argument("--attach", action="store_true", help="Attach after launch")
     launch_cmd.set_defaults(func=launch)
 
@@ -883,6 +1192,29 @@ def parser() -> argparse.ArgumentParser:
     profiles.add_argument("--agent", help="Show one profile")
     profiles.set_defaults(func=profiles_cmd)
 
+    doctor = command("doctor", help="Diagnose project tmux socket, registry, and live-session mismatches")
+    doctor.add_argument("--question", help="Short troubleshooting question to record in the diagnostic event")
+    doctor.add_argument("--context", help="Short context to record in the diagnostic event")
+    doctor.add_argument("--no-log", action="store_true", help="Do not append a structured doctor event")
+    doctor.add_argument("--show-log-path", action="store_true", help="Print the structured doctor log path")
+    doctor.set_defaults(func=doctor_cmd)
+
+    log = command("log", help="Manage pane transcript logging via tmux pipe-pane")
+    log_sub = log.add_subparsers(dest="log_action", required=True)
+    log_start = log_sub.add_parser("start", help="Start transcript logging for a pane")
+    log_start.add_argument("session")
+    log_start.add_argument("--pane", help="Explicit pane target, e.g. session:0.0")
+    log_start.add_argument("--output", help="Transcript path; defaults under .agent/tmux.d/logs/")
+    log_start.set_defaults(func=log_cmd)
+    log_stop = log_sub.add_parser("stop", help="Stop transcript logging for a pane")
+    log_stop.add_argument("session")
+    log_stop.add_argument("--pane", help="Explicit pane target, e.g. session:0.0")
+    log_stop.set_defaults(func=log_cmd)
+    log_status = log_sub.add_parser("status", help="Show transcript logging status")
+    log_status.add_argument("session")
+    log_status.add_argument("--pane", help="Explicit pane target, e.g. session:0.0")
+    log_status.set_defaults(func=log_cmd)
+
     attach = command("attach", help="Attach to a session")
     attach.add_argument("session")
     attach.set_defaults(func=attach_cmd)
@@ -931,13 +1263,23 @@ def parser() -> argparse.ArgumentParser:
 def main() -> int:
     args = parser().parse_args()
     if getattr(args, "cmd", None) == "launch":
-        return launch(args)
+        try:
+            return launch(args)
+        except TmuxError as exc:
+            root = project_root(Path(args.cwd) if getattr(args, "cwd", None) else None)
+            print_tmux_error(root, socket_path(root, getattr(args, "socket", None)), exc, context="launch")
+            return 2
     if getattr(args, "cmd", None) == "send":
         if args.no_enter:
             args.enter = False
         else:
             args.enter = True
-    return args.func(args)
+    try:
+        return args.func(args)
+    except TmuxError as exc:
+        root = project_root(Path(args.cwd) if getattr(args, "cwd", None) else None)
+        print_tmux_error(root, socket_path(root, getattr(args, "socket", None)), exc, context=getattr(args, "cmd", "command"))
+        return 2
 
 
 if __name__ == "__main__":

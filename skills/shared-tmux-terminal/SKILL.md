@@ -22,22 +22,27 @@ Use this skill when a task needs a live terminal that both the agent and a human
 4. Report the socket, session name, attach command, and current pane state.
 5. Use the same session for follow-up sends, reads, and interrupts.
 
+Run commands from the project root. If that is uncertain, pass `--cwd /path/to/project`.
+
 ## Use The Helper Script
 
 Prefer the CLI over ad hoc tmux commands:
 
 ```bash
-agent-tmux launch --purpose build --run "claude --name build"
+agent-tmux launch --purpose build --run "claude --name build" --log
 agent-tmux list
 agent-tmux report
+agent-tmux doctor
 ```
 
 When a project has a wrapper, prefer the shorter form:
 
 ```bash
-.agent/tmux launch --purpose build --run "claude --name build"
+.agent/tmux launch --purpose build --run "claude --name build" --log
 .agent/tmux list
 .agent/tmux report
+.agent/tmux doctor
+.agent/tmux log status build-123
 .agent/tmux send build-123 "npm test"
 .agent/tmux read build-123 --lines 120
 .agent/tmux read build-123 --all --number
@@ -82,6 +87,8 @@ Keep the report compact. The goal is to make it easy for a human to join and eas
 - Use `prompt` and `action` for terminal-agent UIs so text entry and submission are explicit and profile-aware.
 - Use `read --all`, `read --start`, `search`, `wait`, and `dump` before deciding an agent is stuck; the current viewport is often not enough.
 - Treat `--lines N` on `read`, `search`, `wait`, and `dump` as "last N captured lines"; use `--start`, `--end`, or `--all` for explicit tmux history slices.
+- If a session seems missing or conflicts with what the human sees, run `doctor` from the project root or with `--cwd`. Do not conclude absence from a failed socket probe.
+- Use `launch --log` or `log start` for long-running terminal agents. Logs are raw transcripts under `.agent/tmux.d/logs/`.
 - If sessions need to be rearranged, use the helper script to move or join windows and panes rather than recreating them.
 - Commit `.agent/tmux` if a project wants the convenience command; do not commit `.agent/tmux.sock` or `.agent/tmux.d/`.
 
@@ -95,4 +102,6 @@ Keep the report compact. The goal is to make it easy for a human to join and eas
 
 - The socket path is project-local, but tmux persistence still depends on the tmux server process staying alive.
 - This skill is for shared live terminals, not for recording or replaying terminal history after reboot.
+- `doctor` records structured troubleshooting events under `.agent/tmux.d/doctor/events.jsonl`; use these to improve the tool, not as task status.
+- Transcript logs are raw terminal streams. Treat artifacts and tests as truth for task completion.
 - Distribution is the vendor-neutral `agent-tmux` CLI plus optional per-project wrapper. The Codex skill is only one adapter around the same CLI.

@@ -4,13 +4,17 @@
 
 Use it from Codex, Claude Code, shell scripts, or any terminal agent. Do not rely on editor-specific terminal internals when a live, inspectable, interruptible session is needed.
 
+Run commands from the project root. If the project root is uncertain, pass `--cwd /path/to/project`.
+
 ## Commands
 
 ```bash
-agent-tmux launch --session reviewer --purpose review --run "claude --name reviewer"
+agent-tmux launch --session reviewer --purpose review --run "claude --name reviewer" --log
 agent-tmux report
 agent-tmux list
+agent-tmux doctor
 agent-tmux status reviewer
+agent-tmux log status reviewer
 agent-tmux read reviewer --lines 120
 agent-tmux read reviewer --all --number
 agent-tmux search reviewer "error|failed" --ignore-case --context 3
@@ -38,6 +42,24 @@ After every launch or layout change, report:
 
 Treat tmux state as shared. A human can attach concurrently, change pane focus, send input, or interrupt a process.
 
+If `list`, `report`, or `status` conflicts with what the human sees, run:
+
+```bash
+agent-tmux doctor --question "<what looked wrong>" --context "<what you were doing>"
+```
+
+Do not conclude a session is absent from a socket error. `doctor` records structured JSONL diagnostics under `.agent/tmux.d/doctor/events.jsonl`.
+
+Use transcript logging for long-running agents:
+
+```bash
+agent-tmux log start <session>
+agent-tmux log status <session>
+agent-tmux log stop <session>
+```
+
+Prefer `launch --log` when starting new long-running sessions.
+
 Use `prompt` instead of `send` when interacting with terminal agents such as Claude Code, Codex, or Gemini CLI. `prompt` sends text and then submits with the selected agent profile. Use `action submit` when text is already sitting in the input area.
 
 Use deeper inspection before deciding a task is stuck:
@@ -61,6 +83,8 @@ By default, runtime files live under the project:
 ```text
 .agent/tmux.sock
 .agent/tmux.d/registry.json
+.agent/tmux.d/doctor/events.jsonl
+.agent/tmux.d/logs/
 ```
 
 The wrapper `.agent/tmux` may be committed. Runtime files should be ignored.
