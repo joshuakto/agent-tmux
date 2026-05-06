@@ -54,3 +54,19 @@ clear: C-l
 ```
 
 Profiles are still valuable because they provide one place to document and change vendor-specific interaction behavior later.
+
+## Adding Another CLI Agent
+
+Keep profiles conservative. A profile should map stable input actions only:
+
+```text
+submit
+interrupt
+eof
+escape
+clear
+```
+
+Do not add task-status heuristics, auto-approval behavior, or UI text parsing to a profile. If a CLI changes its UI, update only the key sequence for the affected action and validate with a small live session.
+
+Transcript readability is intentionally shared across agents. `read --since-mark` and `wait --from-now` normalize common terminal control sequences emitted by TUIs such as Claude Code, Codex CLI, and Gemini CLI. If a new CLI renders poorly, improve the terminal-sequence normalizer, not the agent profile, unless the problem is an input key.

@@ -41,29 +41,17 @@ agent-tmux install-wrapper
 
 The wrapper is intentionally small. It forwards to `agent-tmux` and does not store state.
 
-## Usage
+## Golden Path
 
 ```bash
 agent-tmux launch --session reviewer --purpose review --run "claude --name reviewer" --log
 agent-tmux report
-agent-tmux list
-agent-tmux doctor
-agent-tmux status reviewer
-agent-tmux log status reviewer
-agent-tmux mark reviewer --label before-test
-agent-tmux read reviewer --lines 120
+agent-tmux prompt reviewer --agent claude "Run tests and report failures."
 agent-tmux read reviewer --since-mark <mark-id> --lines 120
-agent-tmux read reviewer --all --number
+agent-tmux wait reviewer "tests passed|failed" --since-mark <mark-id> --timeout 300
 agent-tmux search reviewer "error|failed" --ignore-case --context 3
-agent-tmux wait reviewer "tests passed|failed" --ignore-case --timeout 120
-agent-tmux wait reviewer "tests passed|failed" --from-now --timeout 120
-agent-tmux dump reviewer --all
-agent-tmux send reviewer "npm test"
-agent-tmux prompt reviewer --agent claude "What is your current status?"
-agent-tmux action reviewer submit --agent claude
-agent-tmux interrupt reviewer
+agent-tmux doctor --question "why did the session disappear?" --context "human can still see it"
 agent-tmux attach reviewer
-agent-tmux tmux-profile apply
 ```
 
 With the project wrapper:
@@ -71,6 +59,27 @@ With the project wrapper:
 ```bash
 .agent/tmux report
 .agent/tmux attach reviewer
+```
+
+Use the golden path for routine agent supervision. Logs and marks are navigation aids; artifacts, tests, commits, process exit status, and explicit reports are task truth.
+
+## Advanced Commands
+
+Use these when recovering, debugging, or arranging sessions:
+
+```bash
+agent-tmux list
+agent-tmux status reviewer
+agent-tmux log status reviewer
+agent-tmux mark reviewer --label before-test
+agent-tmux read reviewer --lines 120
+agent-tmux read reviewer --all --number
+agent-tmux wait reviewer "tests passed|failed" --from-now --timeout 120
+agent-tmux dump reviewer --all
+agent-tmux send reviewer "npm test"
+agent-tmux action reviewer submit --agent claude
+agent-tmux interrupt reviewer
+agent-tmux tmux-profile apply
 ```
 
 ## Reading Past The Viewport
@@ -178,39 +187,22 @@ Give terminal agents this contract:
 Use agent-tmux for shared interactive terminal work.
 Run it from the project root, or pass --cwd /path/to/project.
 
-Launch a session with:
-agent-tmux launch --session <name> --purpose <purpose> --run "<command>" --log
+Golden path:
 
-Report status with:
+agent-tmux launch --session <name> --purpose <purpose> --run "<command>" --log
 agent-tmux report
+agent-tmux prompt <session> --agent claude "<instruction>"
+agent-tmux read <session> --since-mark <mark-id> --lines 120
+agent-tmux wait <session> "<pattern>" --since-mark <mark-id> --timeout 300
 
 If a session seems missing or socket access fails, diagnose with:
 agent-tmux doctor --question "<what looked wrong>" --context "<what you were doing>"
 
-Read output with:
-agent-tmux read <session> --lines 120
-agent-tmux read <session> --since-mark <mark-id> --lines 120
+If a human wants to inspect:
+agent-tmux attach <session>
 
-Search deeper history with:
-agent-tmux search <session> "<pattern>" --context 3
-
-Wait for a progress signal with:
-agent-tmux wait <session> "<pattern>" --timeout 120
-agent-tmux wait <session> "<pattern>" --from-now --timeout 120
-
-Send input with:
-agent-tmux send <session> "<text>"
-
-Send a terminal-agent prompt with:
-agent-tmux prompt <session> --agent claude "<prompt>"
-
-Submit already-entered text with:
-agent-tmux action <session> submit --agent claude
-
-Interrupt stuck work with:
-agent-tmux interrupt <session>
-
-After every launch or layout change, report the session name, socket path, attach command, pane list, active pane, and a recent output sample.
+Do not treat logs, marks, or wait output as task truth.
+Task truth comes from artifacts, tests, commits, process exit status, and explicit reports.
 ```
 
 The same text is available in `skills/shared-tmux-terminal/references/agent-contract.md`.

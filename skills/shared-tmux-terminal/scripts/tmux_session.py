@@ -472,7 +472,10 @@ def default_log_file(root: Path, target: str) -> Path:
     return transcript_dir(root) / f"{safe_target}-{timestamp}.log"
 
 
+OSC_RE = re.compile(r"\x1b\].*?(?:\x07|\x1b\\)", re.DOTALL)
 ANSI_RE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
+CURSOR_RIGHT_RE = re.compile(r"\x1b\[(\d*)C")
+CURSOR_LEFT_RE = re.compile(r"\x1b\[(\d*)D")
 
 
 def strip_backspaces(text: str) -> str:
@@ -488,6 +491,9 @@ def strip_backspaces(text: str) -> str:
 
 def normalize_transcript(text: str, *, ansi: bool = False) -> str:
     if not ansi:
+        text = OSC_RE.sub("", text)
+        text = CURSOR_RIGHT_RE.sub(lambda match: " " * int(match.group(1) or "1"), text)
+        text = CURSOR_LEFT_RE.sub(lambda match: "\b" * int(match.group(1) or "1"), text)
         text = ANSI_RE.sub("", text)
         text = strip_backspaces(text)
     text = text.replace("\r\n", "\n").replace("\r", "\n")

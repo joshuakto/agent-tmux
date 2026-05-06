@@ -5,110 +5,67 @@ description: Launch, inspect, attach, and manage project-local tmux sessions for
 
 # Shared Tmux Terminal
 
-Use this skill when a task needs a live terminal that both the agent and a human can share.
+Use this skill when work needs a live terminal shared by an agent and a human.
 
-## Core Model
+## Core Contract
 
-- One tmux server per project, usually at `./.agent/tmux.sock`.
-- Multiple tmux sessions inside that server, one per agent or task.
-- Humans can attach to any session and interfere live.
-- Every agent uses the same vendor-neutral `agent-tmux` CLI for launch, read, send, report, and management.
+- One project tmux server, usually at `./.agent/tmux.sock`.
+- Multiple named sessions inside that server, one per agent/task.
+- Humans may attach concurrently, change focus, type input, or interrupt.
+- Run from the project root; if uncertain, pass `--cwd /path/to/project`.
+- `agent-tmux` observes and controls terminal sessions. It does not decide task state.
+- Task truth comes from artifacts, tests, commits, process exit status, and explicit reports. Logs and marks are navigation aids only.
 
-## Default Workflow
+## Golden Path First
 
-1. Find the project root.
-2. Launch or reuse the project tmux server.
-3. Create a named session for the task.
-4. Report the socket, session name, attach command, and current pane state.
-5. Use the same session for follow-up sends, reads, and interrupts.
-
-Run commands from the project root. If that is uncertain, pass `--cwd /path/to/project`.
-
-## Use The Helper Script
-
-Prefer the CLI over ad hoc tmux commands:
+Use the project wrapper when present; otherwise replace `.agent/tmux` with `agent-tmux`.
 
 ```bash
-agent-tmux launch --purpose build --run "claude --name build" --log
-agent-tmux list
-agent-tmux report
-agent-tmux doctor
-```
-
-When a project has a wrapper, prefer the shorter form:
-
-```bash
-.agent/tmux launch --purpose build --run "claude --name build" --log
-.agent/tmux list
+.agent/tmux launch --session <name> --purpose <purpose> --run "<agent command>" --log
 .agent/tmux report
-.agent/tmux doctor
-.agent/tmux log status build-123
-.agent/tmux mark build-123 --label before-test
-.agent/tmux send build-123 "npm test"
-.agent/tmux read build-123 --lines 120
-.agent/tmux read build-123 --since-mark <mark-id> --lines 120
-.agent/tmux read build-123 --all --number
-.agent/tmux search build-123 "error|failed" --ignore-case --context 3
-.agent/tmux wait build-123 "complete|failed" --ignore-case --timeout 120
-.agent/tmux wait build-123 "complete|failed" --from-now --timeout 120
-.agent/tmux prompt build-123 --agent claude "Report progress."
-.agent/tmux action build-123 submit --agent claude
-.agent/tmux interrupt build-123
-.agent/tmux attach build-123
+.agent/tmux prompt <session> --agent claude "<instruction>"
+.agent/tmux read <session> --since-mark <mark-id> --lines 120
+.agent/tmux wait <session> "<pattern>" --since-mark <mark-id> --timeout 300
+.agent/tmux search <session> "<error|failed|complete>" --context 3
+.agent/tmux doctor --question "<what looked wrong>" --context "<what you were doing>"
+.agent/tmux attach <session>
 ```
 
-Install the wrapper in a project with:
+`prompt` creates a transcript mark before sending and prints it in the receipt. After `prompt`, use that mark for follow-up reads and waits. Marks are out-of-band transcript offsets; they are not typed into the terminal.
 
-```bash
-agent-tmux install-wrapper
-```
+## Decision Rules
 
-The wrapper must stay dumb: it only resolves and forwards to `agent-tmux`.
+- Need to start shared work: `launch --log`, then `report`.
+- Need to send a user message to Claude/Codex/Gemini: use `prompt`, not raw `send`.
+- Need the response to your last prompt: use `read --since-mark <mark-id>`.
+- Need to wait for new output: use `wait --since-mark <mark-id>` or `wait --from-now`.
+- Session seems missing or socket access fails: run `doctor`; do not conclude absence from a failed probe.
+- Human wants to inspect/interfere: report the `attach` command.
+- Need proof of completion: inspect artifacts/tests/branches, not logs or marks.
 
-For Claude Code or other terminal agents, load `references/agent-contract.md` when you need a concise reusable instruction block. Load `references/agent-profiles.md` when you need profile-specific key behavior.
+## Load References Only When Needed
+
+- `references/agent-contract.md`: concise reusable instruction block for terminal agents.
+- `references/recovery.md`: missing sessions, stale history, stuck processes, raw keys, logs, dumps, pane/window recovery.
+- `references/agent-profiles.md`: Claude/Codex/Gemini key behavior and profile actions.
+- `references/human-tmux.md`: attach, mouse scrolling, tmux profile, pane/window navigation for humans.
 
 ## Reporting Contract
 
-After every session launch or topology change, report:
+After every launch or layout change, report:
 
 - project root
 - socket path
-- session name(s)
-- windows and panes
-- active pane
+- session name
 - attach command
-- a short visible-output sample from each pane
+- active pane and pane list
+- compact recent output sample
 
-Keep the report compact. The goal is to make it easy for a human to join and easy for the agent to recover the current state.
+Keep reports compact. The goal is easy human attachment and easy agent recovery, not a full task summary.
 
-## Management Rules
+## Runtime Notes
 
-- Prefer one tmux server per project, not one server per agent.
-- Use stable, descriptive session names.
-- Treat the tmux session as shared state: humans may attach concurrently and change focus or input.
-- Use `send` for literal commands, `keys` for raw tmux key sequences, and `interrupt` for Ctrl-C.
-- Use `prompt` and `action` for terminal-agent UIs so text entry and submission are explicit and profile-aware.
-- `prompt` creates a transcript mark before sending by default. Use the returned mark id with `read --since-mark` or `wait --since-mark` to inspect only new output.
-- Use `read --all`, `read --start`, `search`, `wait`, and `dump` before deciding an agent is stuck; the current viewport is often not enough.
-- Prefer `wait --from-now` or `wait --since-mark` when old scrollback may contain the same pattern.
-- Treat `--lines N` on `read`, `search`, `wait`, and `dump` as "last N captured lines"; use `--start`, `--end`, or `--all` for explicit tmux history slices.
-- If a session seems missing or conflicts with what the human sees, run `doctor` from the project root or with `--cwd`. Do not conclude absence from a failed socket probe.
-- Use `launch --log` or `log start` for long-running terminal agents. Logs are raw transcripts under `.agent/tmux.d/logs/`.
-- If sessions need to be rearranged, use the helper script to move or join windows and panes rather than recreating them.
-- Use `tmux-profile apply` when a human wants mouse scrolling, larger history, pane labels, and easier tmux navigation in the project server.
-- Commit `.agent/tmux` if a project wants the convenience command; do not commit `.agent/tmux.sock` or `.agent/tmux.d/`.
-
-## When To Use Extra Tmux Operations
-
-- Split a session into more panes when the human should observe multiple tasks side by side.
-- Move or join windows when you want a clean shared layout without restarting the running process.
-- Kill only the session or pane you no longer need; do not destroy a live session just to relabel it.
-
-## Notes
-
-- The socket path is project-local, but tmux persistence still depends on the tmux server process staying alive.
-- This skill is for shared live terminals, not for recording or replaying terminal history after reboot.
-- `doctor` records structured troubleshooting events under `.agent/tmux.d/doctor/events.jsonl`; use these to improve the tool, not as task status.
-- Marks are out-of-band transcript offsets under `.agent/tmux.d/marks.json`; they are not typed into the pane and are not task status.
-- Transcript logs are raw terminal streams. Treat artifacts and tests as truth for task completion.
-- Distribution is the vendor-neutral `agent-tmux` CLI plus optional per-project wrapper. The Codex skill is only one adapter around the same CLI.
+- Commit `.agent/tmux` if a project wants the convenience command.
+- Do not commit `.agent/tmux.sock` or `.agent/tmux.d/`.
+- The socket is project-local, but tmux persistence still depends on the tmux server process staying alive.
+- `doctor` writes intentional diagnostics under `.agent/tmux.d/doctor/events.jsonl`; use them to improve the tool, not as task status.

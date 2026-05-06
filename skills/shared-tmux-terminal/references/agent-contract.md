@@ -1,99 +1,35 @@
 # Agent Contract
 
-`agent-tmux` is the vendor-neutral control surface for shared human-agent terminals.
+Give terminal agents this concise contract when they need shared tmux access.
 
-Use it from Codex, Claude Code, shell scripts, or any terminal agent. Do not rely on editor-specific terminal internals when a live, inspectable, interruptible session is needed.
+```text
+Use agent-tmux for shared interactive terminal work.
+Run from the project root, or pass --cwd /path/to/project.
 
-Run commands from the project root. If the project root is uncertain, pass `--cwd /path/to/project`.
+Golden path:
+1. Launch with:
+   agent-tmux launch --session <name> --purpose <purpose> --run "<command>" --log
+2. Report the session:
+   agent-tmux report
+3. Send terminal-agent instructions with:
+   agent-tmux prompt <session> --agent claude "<instruction>"
+4. Use the mark returned by prompt:
+   agent-tmux read <session> --since-mark <mark-id> --lines 120
+   agent-tmux wait <session> "<pattern>" --since-mark <mark-id> --timeout 300
+5. If the session seems missing or socket access fails:
+   agent-tmux doctor --question "<what looked wrong>" --context "<what you were doing>"
+6. If a human wants to inspect:
+   agent-tmux attach <session>
 
-## Commands
-
-```bash
-agent-tmux launch --session reviewer --purpose review --run "claude --name reviewer" --log
-agent-tmux report
-agent-tmux list
-agent-tmux doctor
-agent-tmux status reviewer
-agent-tmux log status reviewer
-agent-tmux mark reviewer --label before-test
-agent-tmux read reviewer --lines 120
-agent-tmux read reviewer --since-mark <mark-id> --lines 120
-agent-tmux read reviewer --all --number
-agent-tmux search reviewer "error|failed" --ignore-case --context 3
-agent-tmux wait reviewer "complete|failed|error" --ignore-case --timeout 120
-agent-tmux wait reviewer "complete|failed|error" --from-now --timeout 120
-agent-tmux dump reviewer --all
-agent-tmux send reviewer "npm test"
-agent-tmux prompt reviewer --agent claude "What are you working on?"
-agent-tmux action reviewer submit --agent claude
-agent-tmux interrupt reviewer
-agent-tmux attach reviewer
+Do not treat logs, marks, or wait output as task truth.
+Task truth comes from artifacts, tests, commits, process exit status, and explicit reports.
 ```
 
 If a project wrapper exists, use `.agent/tmux` instead of `agent-tmux`.
 
-## Agent Behavior
-
-After every launch or layout change, report:
-
-- session name
-- socket path
-- attach command
-- pane list
-- active pane
-- recent visible output
-
-Treat tmux state as shared. A human can attach concurrently, change pane focus, send input, or interrupt a process.
-
-If `list`, `report`, or `status` conflicts with what the human sees, run:
-
-```bash
-agent-tmux doctor --question "<what looked wrong>" --context "<what you were doing>"
-```
-
-Do not conclude a session is absent from a socket error. `doctor` records structured JSONL diagnostics under `.agent/tmux.d/doctor/events.jsonl`.
-
-Use transcript logging for long-running agents:
-
-```bash
-agent-tmux log start <session>
-agent-tmux log status <session>
-agent-tmux log stop <session>
-```
-
-Prefer `launch --log` when starting new long-running sessions.
-
-Use `prompt` instead of `send` when interacting with terminal agents such as Claude Code, Codex, or Gemini CLI. `prompt` sends text and then submits with the selected agent profile. Use `action submit` when text is already sitting in the input area.
-
-`prompt` creates a transcript mark before sending by default. Use the returned mark id to inspect only new output:
-
-```bash
-agent-tmux read <session> --since-mark <mark-id> --lines 120
-agent-tmux wait <session> "<pattern>" --since-mark <mark-id> --timeout 300
-```
-
-Marks are out-of-band offsets in the transcript log. They are not typed into the pane and cannot collide with real terminal output.
-
-Use deeper inspection before deciding a task is stuck:
-
-```bash
-agent-tmux read <session> --lines 500
-agent-tmux read <session> --all --number
-agent-tmux search <session> "<pattern>" --context 3
-agent-tmux wait <session> "<pattern>" --timeout 120
-agent-tmux wait <session> "<pattern>" --from-now --timeout 120
-agent-tmux dump <session> --all
-```
-
-For `read`, `search`, `wait`, and `dump`, `--lines N` means the last N captured lines. Use `read --start`, `read --end`, or `--all` for explicit tmux history slices.
-
-Use `wait --from-now` when old scrollback may already contain the pattern you are waiting for.
-
-For profile details, read `references/agent-profiles.md`.
+For recovery tools, read `references/recovery.md`. For profile behavior, read `references/agent-profiles.md`.
 
 ## Runtime State
-
-By default, runtime files live under the project:
 
 ```text
 .agent/tmux.sock
