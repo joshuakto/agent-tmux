@@ -15,10 +15,13 @@ agent-tmux list
 agent-tmux doctor
 agent-tmux status reviewer
 agent-tmux log status reviewer
+agent-tmux mark reviewer --label before-test
 agent-tmux read reviewer --lines 120
+agent-tmux read reviewer --since-mark <mark-id> --lines 120
 agent-tmux read reviewer --all --number
 agent-tmux search reviewer "error|failed" --ignore-case --context 3
 agent-tmux wait reviewer "complete|failed|error" --ignore-case --timeout 120
+agent-tmux wait reviewer "complete|failed|error" --from-now --timeout 120
 agent-tmux dump reviewer --all
 agent-tmux send reviewer "npm test"
 agent-tmux prompt reviewer --agent claude "What are you working on?"
@@ -62,6 +65,15 @@ Prefer `launch --log` when starting new long-running sessions.
 
 Use `prompt` instead of `send` when interacting with terminal agents such as Claude Code, Codex, or Gemini CLI. `prompt` sends text and then submits with the selected agent profile. Use `action submit` when text is already sitting in the input area.
 
+`prompt` creates a transcript mark before sending by default. Use the returned mark id to inspect only new output:
+
+```bash
+agent-tmux read <session> --since-mark <mark-id> --lines 120
+agent-tmux wait <session> "<pattern>" --since-mark <mark-id> --timeout 300
+```
+
+Marks are out-of-band offsets in the transcript log. They are not typed into the pane and cannot collide with real terminal output.
+
 Use deeper inspection before deciding a task is stuck:
 
 ```bash
@@ -69,10 +81,13 @@ agent-tmux read <session> --lines 500
 agent-tmux read <session> --all --number
 agent-tmux search <session> "<pattern>" --context 3
 agent-tmux wait <session> "<pattern>" --timeout 120
+agent-tmux wait <session> "<pattern>" --from-now --timeout 120
 agent-tmux dump <session> --all
 ```
 
 For `read`, `search`, `wait`, and `dump`, `--lines N` means the last N captured lines. Use `read --start`, `read --end`, or `--all` for explicit tmux history slices.
+
+Use `wait --from-now` when old scrollback may already contain the pattern you are waiting for.
 
 For profile details, read `references/agent-profiles.md`.
 
@@ -83,6 +98,7 @@ By default, runtime files live under the project:
 ```text
 .agent/tmux.sock
 .agent/tmux.d/registry.json
+.agent/tmux.d/marks.json
 .agent/tmux.d/doctor/events.jsonl
 .agent/tmux.d/logs/
 ```

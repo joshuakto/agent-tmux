@@ -90,6 +90,23 @@ exit 1
 """
 
 
+TMUX_PROFILE_COMMANDS: list[list[str]] = [
+    ["set-option", "-g", "mouse", "on"],
+    ["set-option", "-g", "history-limit", "50000"],
+    ["set-option", "-g", "display-panes-time", "3000"],
+    ["set-option", "-g", "status-interval", "5"],
+    ["set-option", "-g", "status-left-length", "40"],
+    ["set-option", "-g", "status-right-length", "80"],
+    ["set-option", "-g", "status-left", "[#S] "],
+    ["set-option", "-g", "status-right", "#{pane_id} #{pane_current_command} %H:%M"],
+    ["set-window-option", "-g", "pane-border-status", "top"],
+    ["set-window-option", "-g", "pane-border-format", "#P #{pane_id} #{pane_current_command}"],
+    ["bind-key", "S", "choose-tree", "-Zs"],
+    ["bind-key", "W", "choose-tree", "-Zw"],
+    ["bind-key", "P", "display-panes"],
+]
+
+
 def now_iso() -> str:
     return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
 
@@ -135,6 +152,10 @@ def transcript_dir(root: Path) -> Path:
     return root / ".agent" / "tmux.d" / "logs"
 
 
+def marks_path(root: Path) -> Path:
+    return root / ".agent" / "tmux.d" / "marks.json"
+
+
 def ensure_parent(path: Path) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -158,6 +179,29 @@ def load_registry(path: Path) -> dict[str, Any]:
 
 
 def save_registry(path: Path, data: dict[str, Any]) -> None:
+    ensure_parent(path)
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp.write_text(json.dumps(data, indent=2, sort_keys=True) + "\n")
+    tmp.replace(path)
+
+
+def load_marks(path: Path) -> dict[str, Any]:
+    if not path.exists():
+        return {
+            "schema_version": 1,
+            "marks": {},
+            "latest_by_target": {},
+        }
+    data = json.loads(path.read_text())
+    if not isinstance(data, dict):
+        raise ValueError("marks file is not a JSON object")
+    data.setdefault("schema_version", 1)
+    data.setdefault("marks", {})
+    data.setdefault("latest_by_target", {})
+    return data
+
+
+def save_marks(path: Path, data: dict[str, Any]) -> None:
     ensure_parent(path)
     tmp = path.with_suffix(path.suffix + ".tmp")
     tmp.write_text(json.dumps(data, indent=2, sort_keys=True) + "\n")
@@ -426,6 +470,166 @@ def default_log_file(root: Path, target: str) -> Path:
     safe_target = slugify(target.replace(":", "-").replace(".", "-"))
     timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
     return transcript_dir(root) / f"{safe_target}-{timestamp}.log"
+
+
+ANSI_RE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
+
+
+def strip_backspaces(text: str) -> str:
+    chars: list[str] = []
+    for char in text:
+        if char == "\b":
+            if chars:
+                chars.pop()
+            continue
+        chars.append(char)
+    return "".join(chars)
+
+
+def normalize_transcript(text: str, *, ansi: bool = False) -> str:
+    if not ansi:
+        text = ANSI_RE.sub("", text)
+        text = strip_backspaces(text)
+    text = text.replace("\r\n", "\n").replace("\r", "\n")
+    return text
+
+
+def read_file_from_offset(path: Path, offset: int, *, max_bytes: int | None = None) -> tuple[str, int, int]:
+    if not path.exists():
+        raise SystemExit(f"Transcript log not found: {path}")
+    size = path.stat().st_size
+    start = min(max(offset, 0), size)
+    omitted = 0
+    if max_bytes is not None and max_bytes > 0 and size - start > max_bytes:
+        omitted = size - start - max_bytes
+        start = size - max_bytes
+    with path.open("rb") as handle:
+        handle.seek(start)
+        data = handle.read()
+    return data.decode(errors="replace"), size, omitted
+
+
+def resolve_registered_log(registry: dict[str, Any], session: str, target: str) -> Path | None:
+    pane_log = registry.get("sessions", {}).get(session, {}).get("logs", {}).get(target, {})
+    if pane_log.get("path") and not pane_log.get("stopped_at"):
+        return Path(pane_log["path"])
+    return None
+
+
+def pane_for_target(socket: Path, session: str, target: str) -> dict[str, Any] | None:
+    target_session = session_name_from_target(session, target)
+    for pane in list_panes(socket, target_session):
+        pane_target = f"{target_session}:{pane['window_index']}.{pane['pane_index']}"
+        if pane_target == target:
+            return pane
+    return None
+
+
+def ensure_transcript(
+    root: Path,
+    socket: Path,
+    registry: dict[str, Any],
+    session: str,
+    target: str,
+) -> tuple[Path, bool]:
+    target_session = session_name_from_target(session, target)
+    pane = pane_for_target(socket, target_session, target)
+    if pane is None:
+        raise SystemExit(f"Pane not found: {target}")
+
+    log_path = resolve_registered_log(registry, target_session, target)
+    if log_path is not None:
+        if not log_path.is_absolute():
+            log_path = root / log_path
+        if not pane.get("pipe"):
+            start_transcript(socket, target, log_path)
+            update_log_registry(
+                registry,
+                target_session,
+                target,
+                {"path": str(log_path), "started_at": now_iso(), "stopped_at": None},
+            )
+            return log_path, True
+        ensure_parent(log_path)
+        if not log_path.exists():
+            log_path.touch()
+        return log_path, False
+
+    if pane.get("pipe"):
+        raise SystemExit(
+            f"Pane {target} already has an unregistered tmux pipe. "
+            "Stop it or start logging with agent-tmux before using marks."
+        )
+
+    log_path = default_log_file(root, target)
+    start_transcript(socket, target, log_path)
+    update_log_registry(
+        registry,
+        target_session,
+        target,
+        {"path": str(log_path), "started_at": now_iso(), "stopped_at": None},
+    )
+    return log_path, True
+
+
+def unique_mark_id(marks: dict[str, Any], target: str, label: str | None) -> str:
+    timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+    base_parts = ["m", timestamp, slugify(label or target)]
+    base = "_".join(base_parts)
+    candidate = base
+    suffix = 2
+    existing = marks.setdefault("marks", {})
+    while candidate in existing:
+        candidate = f"{base}_{suffix}"
+        suffix += 1
+    return candidate
+
+
+def create_mark(
+    root: Path,
+    socket: Path,
+    registry: dict[str, Any],
+    session: str,
+    target: str,
+    *,
+    label: str | None = None,
+) -> tuple[str, dict[str, Any], bool]:
+    registry_changed = False
+    log_path, changed = ensure_transcript(root, socket, registry, session, target)
+    registry_changed = registry_changed or changed
+    ensure_parent(log_path)
+    if not log_path.exists():
+        log_path.touch()
+
+    marks_file = marks_path(root)
+    marks = load_marks(marks_file)
+    mark_id = unique_mark_id(marks, target, label)
+    entry = {
+        "id": mark_id,
+        "label": label,
+        "session": session_name_from_target(session, target),
+        "target": target,
+        "log_path": str(log_path),
+        "offset": log_path.stat().st_size,
+        "created_at": now_iso(),
+    }
+    marks.setdefault("marks", {})[mark_id] = entry
+    marks.setdefault("latest_by_target", {})[target] = mark_id
+    save_marks(marks_file, marks)
+    return mark_id, entry, registry_changed
+
+
+def resolve_mark(root: Path, mark_id: str) -> dict[str, Any]:
+    marks = load_marks(marks_path(root))
+    if mark_id == "latest":
+        latest = marks.get("latest_by_target", {})
+        if len(latest) != 1:
+            raise SystemExit("Mark id 'latest' is ambiguous; pass an explicit mark id.")
+        mark_id = next(iter(latest.values()))
+    entry = marks.get("marks", {}).get(mark_id)
+    if not entry:
+        raise SystemExit(f"Mark not found: {mark_id}")
+    return entry
 
 
 def start_transcript(socket: Path, target: str, output_path: Path) -> None:
@@ -698,6 +902,26 @@ def keys_cmd(args: argparse.Namespace) -> int:
 def read_cmd(args: argparse.Namespace) -> int:
     root = project_root(Path(args.cwd) if args.cwd else None)
     socket = socket_path(root, args.socket)
+    if args.since_mark:
+        if args.all or args.start is not None or args.end is not None or args.no_join:
+            raise SystemExit("--since-mark cannot be combined with --all, --start, --end, or --no-join")
+        mark = resolve_mark(root, args.since_mark)
+        if mark.get("session") != args.session:
+            raise SystemExit(f"Mark {args.since_mark} belongs to session {mark.get('session')}, not {args.session}")
+        if args.pane and mark.get("target") != args.pane:
+            raise SystemExit(f"Mark {args.since_mark} belongs to pane {mark.get('target')}, not {args.pane}")
+        max_bytes = None if args.max_bytes == 0 else args.max_bytes
+        output, _size, omitted = read_file_from_offset(Path(mark["log_path"]), int(mark["offset"]), max_bytes=max_bytes)
+        output = normalize_transcript(output, ansi=args.ansi)
+        output = tail_lines(output, limit=args.lines)
+        if omitted:
+            print(f"[agent-tmux: omitted {omitted} bytes before this excerpt]", file=sys.stderr)
+        formatted = format_lines(output, number=args.number)
+        print(formatted, end="")
+        if formatted and not formatted.endswith("\n"):
+            print()
+        return 0
+
     target = args.pane or args.session
     start: str | int | None
     if args.all:
@@ -785,11 +1009,55 @@ def search_cmd(args: argparse.Namespace) -> int:
 def wait_cmd(args: argparse.Namespace) -> int:
     root = project_root(Path(args.cwd) if args.cwd else None)
     socket = socket_path(root, args.socket)
+    if args.from_now and args.since_mark:
+        raise SystemExit("--from-now and --since-mark are mutually exclusive")
     target = args.pane or args.session
     flags = re.MULTILINE | (re.IGNORECASE if args.ignore_case else 0)
     pattern = re.compile(args.pattern, flags)
     deadline = time.monotonic() + args.timeout
     last_text = ""
+
+    if args.from_now or args.since_mark:
+        registry_file = registry_path(root)
+        registry = load_registry(registry_file)
+        if args.since_mark:
+            mark = resolve_mark(root, args.since_mark)
+            if mark.get("session") != args.session:
+                raise SystemExit(f"Mark {args.since_mark} belongs to session {mark.get('session')}, not {args.session}")
+            if args.pane and mark.get("target") != args.pane:
+                raise SystemExit(f"Mark {args.since_mark} belongs to pane {mark.get('target')}, not {args.pane}")
+            log_path = Path(mark["log_path"])
+            offset = int(mark["offset"])
+        else:
+            target = target_for_args(socket, args.session, args.pane)
+            log_path, changed = ensure_transcript(root, socket, registry, args.session, target)
+            if changed:
+                save_registry(registry_file, registry)
+            ensure_parent(log_path)
+            if not log_path.exists():
+                log_path.touch()
+            offset = log_path.stat().st_size
+
+        max_bytes = None if args.max_bytes == 0 else args.max_bytes
+        while True:
+            last_text, _size, omitted = read_file_from_offset(log_path, offset, max_bytes=max_bytes)
+            last_text = normalize_transcript(last_text, ansi=args.ansi)
+            if pattern.search(last_text):
+                if not args.quiet:
+                    print(f"matched: {args.pattern}")
+                    if omitted:
+                        print(f"[agent-tmux: omitted {omitted} bytes before this excerpt]", file=sys.stderr)
+                    print(tail_lines(last_text, limit=args.tail))
+                return 0
+            if time.monotonic() >= deadline:
+                if not args.quiet:
+                    print(f"timeout waiting for: {args.pattern}")
+                    if omitted:
+                        print(f"[agent-tmux: omitted {omitted} bytes before this excerpt]", file=sys.stderr)
+                    print(tail_lines(last_text, limit=args.tail))
+                return 1
+            time.sleep(args.interval)
+
     while True:
         last_text = capture_pane(socket, target, lines=args.lines)
         if pattern.search(last_text):
@@ -808,13 +1076,44 @@ def wait_cmd(args: argparse.Namespace) -> int:
 def prompt_cmd(args: argparse.Namespace) -> int:
     root = project_root(Path(args.cwd) if args.cwd else None)
     socket = socket_path(root, args.socket)
+    registry_file = registry_path(root)
+    registry = load_registry(registry_file)
     target = target_for_args(socket, args.session, args.pane)
     profile_name, profile = resolve_profile(args.agent)
+    mark_id = None
+    if args.mark:
+        mark_id, _mark, changed = create_mark(
+            root,
+            socket,
+            registry,
+            args.session,
+            target,
+            label=args.mark_label or "prompt",
+        )
+        if changed:
+            save_registry(registry_file, registry)
     send_text(socket, target, args.text)
     if args.submit:
         send_profile_action(socket, target, profile, "submit")
     if not args.quiet:
-        print(f"prompt sent: target={target} profile={profile_name} submitted={'yes' if args.submit else 'no'}")
+        suffix = f" mark={mark_id}" if mark_id else ""
+        print(f"prompt sent: target={target} profile={profile_name} submitted={'yes' if args.submit else 'no'}{suffix}")
+    return 0
+
+
+def mark_cmd(args: argparse.Namespace) -> int:
+    root = project_root(Path(args.cwd) if args.cwd else None)
+    socket = socket_path(root, args.socket)
+    registry_file = registry_path(root)
+    registry = load_registry(registry_file)
+    target = target_for_args(socket, args.session, args.pane)
+    mark_id, mark, changed = create_mark(root, socket, registry, args.session, target, label=args.label)
+    if changed:
+        save_registry(registry_file, registry)
+    print(f"mark created: {mark_id}")
+    print(f"target: {mark['target']}")
+    print(f"log: {mark['log_path']}")
+    print(f"offset: {mark['offset']}")
     return 0
 
 
@@ -842,6 +1141,25 @@ def profiles_cmd(args: argparse.Namespace) -> int:
     for profile_name, profile in sorted(AGENT_PROFILES.items()):
         aliases = ", ".join(profile.get("aliases", []))
         print(f"{profile_name}: actions={', '.join(sorted(profile.get('actions', {})))} aliases={aliases}")
+    return 0
+
+
+def tmux_profile_cmd(args: argparse.Namespace) -> int:
+    root = project_root(Path(args.cwd) if args.cwd else None)
+    socket = socket_path(root, args.socket)
+    if args.profile_action == "show":
+        print("# Project-local tmux profile applied by:")
+        print(f"# agent-tmux --cwd {shlex.quote(str(root))} tmux-profile apply")
+        for command in TMUX_PROFILE_COMMANDS:
+            print("tmux " + " ".join(shlex.quote(part) for part in command))
+        return 0
+
+    ensure_parent(socket)
+    run_tmux(socket, ["start-server"])
+    for command in TMUX_PROFILE_COMMANDS:
+        run_tmux(socket, command)
+    print(f"tmux profile applied: {socket}")
+    print("scope: project tmux server only")
     return 0
 
 
@@ -1135,6 +1453,8 @@ def parser() -> argparse.ArgumentParser:
     read.add_argument("--no-join", action="store_true", help="Do not join wrapped lines")
     read.add_argument("--ansi", action="store_true", help="Preserve ANSI escape sequences")
     read.add_argument("--number", action="store_true", help="Prefix captured lines with line numbers")
+    read.add_argument("--since-mark", help="Read transcript output appended after a mark id")
+    read.add_argument("--max-bytes", type=int, default=20000, help="Maximum transcript bytes to read after a mark; 0 means no limit")
     read.set_defaults(func=read_cmd)
 
     dump = command("dump", help="Write pane history to a file")
@@ -1169,6 +1489,10 @@ def parser() -> argparse.ArgumentParser:
     wait.add_argument("--tail", type=int, default=12, help="Lines to print when done")
     wait.add_argument("--ignore-case", action="store_true")
     wait.add_argument("--quiet", action="store_true")
+    wait.add_argument("--from-now", action="store_true", help="Wait only on transcript output appended after invocation")
+    wait.add_argument("--since-mark", help="Wait only on transcript output appended after a mark id")
+    wait.add_argument("--ansi", action="store_true", help="Preserve ANSI escape sequences when matching transcript output")
+    wait.add_argument("--max-bytes", type=int, default=0, help="Maximum transcript bytes to search after the start offset; 0 means no limit")
     wait.set_defaults(func=wait_cmd)
 
     prompt = command("prompt", help="Send text to a terminal agent and submit using an agent profile")
@@ -1177,8 +1501,16 @@ def parser() -> argparse.ArgumentParser:
     prompt.add_argument("--pane", help="Explicit pane target, e.g. session:0.0")
     prompt.add_argument("--agent", default="generic", help="Agent profile: claude, codex, gemini, generic")
     prompt.add_argument("--no-submit", dest="submit", action="store_false", help="Paste text but do not submit")
+    prompt.add_argument("--no-mark", dest="mark", action="store_false", help="Do not create a transcript mark before sending")
+    prompt.add_argument("--mark-label", help="Optional label for the pre-send mark")
     prompt.add_argument("--quiet", action="store_true")
-    prompt.set_defaults(func=prompt_cmd, submit=True)
+    prompt.set_defaults(func=prompt_cmd, submit=True, mark=True)
+
+    mark = command("mark", help="Create a transcript mark for a session or pane")
+    mark.add_argument("session")
+    mark.add_argument("--pane", help="Explicit pane target, e.g. session:0.0")
+    mark.add_argument("--label", help="Optional human-readable label")
+    mark.set_defaults(func=mark_cmd)
 
     action = command("action", help="Send a named action from an agent profile")
     action.add_argument("session")
@@ -1191,6 +1523,13 @@ def parser() -> argparse.ArgumentParser:
     profiles = command("profiles", help="List terminal-agent interaction profiles")
     profiles.add_argument("--agent", help="Show one profile")
     profiles.set_defaults(func=profiles_cmd)
+
+    tmux_profile = command("tmux-profile", help="Show or apply the project-local tmux ergonomics profile")
+    tmux_profile_sub = tmux_profile.add_subparsers(dest="profile_action", required=True)
+    tmux_profile_show = tmux_profile_sub.add_parser("show", help="Print the tmux commands in the profile")
+    tmux_profile_show.set_defaults(func=tmux_profile_cmd)
+    tmux_profile_apply = tmux_profile_sub.add_parser("apply", help="Apply profile settings to the project tmux server")
+    tmux_profile_apply.set_defaults(func=tmux_profile_cmd)
 
     doctor = command("doctor", help="Diagnose project tmux socket, registry, and live-session mismatches")
     doctor.add_argument("--question", help="Short troubleshooting question to record in the diagnostic event")

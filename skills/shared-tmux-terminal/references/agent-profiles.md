@@ -20,6 +20,13 @@ Use `prompt` when you want to send a user message to a terminal agent:
 agent-tmux prompt reviewer --agent claude "Summarize current status."
 ```
 
+`prompt` creates a transcript mark before sending by default. The mark is an out-of-band log offset, not text typed into the terminal. Use it to inspect only the response that followed the prompt:
+
+```bash
+agent-tmux read reviewer --since-mark <mark-id> --lines 120
+agent-tmux wait reviewer "complete|failed" --since-mark <mark-id> --timeout 300
+```
+
 Use `action` when text is already present in the terminal UI or when you need a non-text key:
 
 ```bash

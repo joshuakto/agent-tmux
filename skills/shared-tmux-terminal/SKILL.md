@@ -43,11 +43,14 @@ When a project has a wrapper, prefer the shorter form:
 .agent/tmux report
 .agent/tmux doctor
 .agent/tmux log status build-123
+.agent/tmux mark build-123 --label before-test
 .agent/tmux send build-123 "npm test"
 .agent/tmux read build-123 --lines 120
+.agent/tmux read build-123 --since-mark <mark-id> --lines 120
 .agent/tmux read build-123 --all --number
 .agent/tmux search build-123 "error|failed" --ignore-case --context 3
 .agent/tmux wait build-123 "complete|failed" --ignore-case --timeout 120
+.agent/tmux wait build-123 "complete|failed" --from-now --timeout 120
 .agent/tmux prompt build-123 --agent claude "Report progress."
 .agent/tmux action build-123 submit --agent claude
 .agent/tmux interrupt build-123
@@ -85,11 +88,14 @@ Keep the report compact. The goal is to make it easy for a human to join and eas
 - Treat the tmux session as shared state: humans may attach concurrently and change focus or input.
 - Use `send` for literal commands, `keys` for raw tmux key sequences, and `interrupt` for Ctrl-C.
 - Use `prompt` and `action` for terminal-agent UIs so text entry and submission are explicit and profile-aware.
+- `prompt` creates a transcript mark before sending by default. Use the returned mark id with `read --since-mark` or `wait --since-mark` to inspect only new output.
 - Use `read --all`, `read --start`, `search`, `wait`, and `dump` before deciding an agent is stuck; the current viewport is often not enough.
+- Prefer `wait --from-now` or `wait --since-mark` when old scrollback may contain the same pattern.
 - Treat `--lines N` on `read`, `search`, `wait`, and `dump` as "last N captured lines"; use `--start`, `--end`, or `--all` for explicit tmux history slices.
 - If a session seems missing or conflicts with what the human sees, run `doctor` from the project root or with `--cwd`. Do not conclude absence from a failed socket probe.
 - Use `launch --log` or `log start` for long-running terminal agents. Logs are raw transcripts under `.agent/tmux.d/logs/`.
 - If sessions need to be rearranged, use the helper script to move or join windows and panes rather than recreating them.
+- Use `tmux-profile apply` when a human wants mouse scrolling, larger history, pane labels, and easier tmux navigation in the project server.
 - Commit `.agent/tmux` if a project wants the convenience command; do not commit `.agent/tmux.sock` or `.agent/tmux.d/`.
 
 ## When To Use Extra Tmux Operations
@@ -103,5 +109,6 @@ Keep the report compact. The goal is to make it easy for a human to join and eas
 - The socket path is project-local, but tmux persistence still depends on the tmux server process staying alive.
 - This skill is for shared live terminals, not for recording or replaying terminal history after reboot.
 - `doctor` records structured troubleshooting events under `.agent/tmux.d/doctor/events.jsonl`; use these to improve the tool, not as task status.
+- Marks are out-of-band transcript offsets under `.agent/tmux.d/marks.json`; they are not typed into the pane and are not task status.
 - Transcript logs are raw terminal streams. Treat artifacts and tests as truth for task completion.
 - Distribution is the vendor-neutral `agent-tmux` CLI plus optional per-project wrapper. The Codex skill is only one adapter around the same CLI.

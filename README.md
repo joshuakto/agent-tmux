@@ -11,6 +11,7 @@ Vendor-neutral tmux session manager for shared human-agent terminals.
 - a lightweight registry at `.agent/tmux.d/registry.json`
 - diagnostics under `.agent/tmux.d/doctor/events.jsonl`
 - optional pane transcripts under `.agent/tmux.d/logs/`
+- transcript marks under `.agent/tmux.d/marks.json` for reading only new output
 - read/write controls through `send`, `read`, `keys`, `interrupt`, `split`, `join-pane`, and `move-window`
 - a dumb project wrapper at `.agent/tmux`
 - Claude Code plugin metadata at `.claude-plugin/plugin.json`
@@ -49,16 +50,20 @@ agent-tmux list
 agent-tmux doctor
 agent-tmux status reviewer
 agent-tmux log status reviewer
+agent-tmux mark reviewer --label before-test
 agent-tmux read reviewer --lines 120
+agent-tmux read reviewer --since-mark <mark-id> --lines 120
 agent-tmux read reviewer --all --number
 agent-tmux search reviewer "error|failed" --ignore-case --context 3
 agent-tmux wait reviewer "tests passed|failed" --ignore-case --timeout 120
+agent-tmux wait reviewer "tests passed|failed" --from-now --timeout 120
 agent-tmux dump reviewer --all
 agent-tmux send reviewer "npm test"
 agent-tmux prompt reviewer --agent claude "What is your current status?"
 agent-tmux action reviewer submit --agent claude
 agent-tmux interrupt reviewer
 agent-tmux attach reviewer
+agent-tmux tmux-profile apply
 ```
 
 With the project wrapper:
@@ -84,6 +89,28 @@ agent-tmux dump reviewer --all
 `dump` writes a capture file under `.agent/tmux.d/dumps/` unless `--output` is provided.
 For `read`, `search`, `wait`, and `dump`, `--lines N` means the last N captured lines. Use `--start`, `--end`, or `--all` when you need an explicit tmux history slice.
 
+## Reading Only New Output
+
+When supervising terminal agents, prefer transcript marks over asking the target agent for status. Marks are out-of-band byte offsets in the transcript log; they are not typed into the pane and cannot collide with real terminal output.
+
+`prompt` creates a pre-send mark by default:
+
+```bash
+agent-tmux prompt reviewer --agent claude "Run tests and report failures."
+# prompt sent: target=reviewer:0.0 profile=claude submitted=yes mark=m_...
+agent-tmux read reviewer --since-mark m_... --lines 120
+agent-tmux wait reviewer "tests passed|failed" --since-mark m_... --timeout 300
+```
+
+Create marks manually or wait only on output appended after invocation:
+
+```bash
+agent-tmux mark reviewer --label before-test
+agent-tmux wait reviewer "complete|failed" --from-now --timeout 300
+```
+
+Marks require transcript logging. `prompt`, `mark`, and `wait --from-now` will start `agent-tmux` transcript logging for the target pane if needed.
+
 ## Diagnostics And Logs
 
 Run commands from the project root, or pass `--cwd /path/to/project`. This matters because the default socket is project-local.
@@ -108,6 +135,17 @@ agent-tmux log stop reviewer
 ```
 
 Logs are written under `.agent/tmux.d/logs/` by default. They are raw terminal transcripts and may contain ANSI escape codes.
+
+## Human Tmux Profile
+
+For easier human inspection, apply the optional project-local tmux profile:
+
+```bash
+agent-tmux tmux-profile show
+agent-tmux tmux-profile apply
+```
+
+The profile affects only the project tmux server. It enables mouse support, larger scrollback, pane border labels, compact status text, and navigation bindings. It does not write `~/.tmux.conf` and is not required for CLI correctness.
 
 ## Agent UI Interaction
 
@@ -151,12 +189,14 @@ agent-tmux doctor --question "<what looked wrong>" --context "<what you were doi
 
 Read output with:
 agent-tmux read <session> --lines 120
+agent-tmux read <session> --since-mark <mark-id> --lines 120
 
 Search deeper history with:
 agent-tmux search <session> "<pattern>" --context 3
 
 Wait for a progress signal with:
 agent-tmux wait <session> "<pattern>" --timeout 120
+agent-tmux wait <session> "<pattern>" --from-now --timeout 120
 
 Send input with:
 agent-tmux send <session> "<text>"
@@ -222,4 +262,4 @@ Ignore:
 .agent/tmux.d/
 ```
 
-The socket, registry, doctor events, dumps, and transcripts are runtime state. They should not be source-controlled.
+The socket, registry, marks, doctor events, dumps, and transcripts are runtime state. They should not be source-controlled.
