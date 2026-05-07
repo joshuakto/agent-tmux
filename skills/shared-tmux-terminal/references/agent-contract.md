@@ -27,6 +27,30 @@ Task truth comes from artifacts, tests, commits, process exit status, and explic
 
 If a project wrapper exists, use `.agent/tmux` instead of `agent-tmux`.
 
+## Manager-Agent Contract
+
+When supervising another terminal agent, use events and board messages to avoid repeated pane polling:
+
+```text
+Launch with native event wiring when supported:
+agent-tmux launch --session <name> --agent claude --events --require-events --purpose <purpose> --run "claude --name <name>" --log
+agent-tmux launch --session <name> --agent codex --events --require-events --purpose <purpose> --run "codex" --log
+
+Send work:
+agent-tmux prompt <session> --agent claude "<instruction>"
+agent-tmux prompt <session> --agent codex "<instruction>"
+
+Wait for the next wakeup:
+agent-tmux events wait --session <session> --timeout 1800
+
+Read the referenced board memo if the event points to one:
+agent-tmux board read <message-id>
+
+Use transcript reads only for recovery or evidence checks.
+```
+
+Events are wakeups. Board posts are durable memos. Neither is task truth.
+
 For recovery tools, read `references/recovery.md`. For profile behavior, read `references/agent-profiles.md`.
 
 ## Runtime State
@@ -35,8 +59,11 @@ For recovery tools, read `references/recovery.md`. For profile behavior, read `r
 .agent/tmux.sock
 .agent/tmux.d/registry.json
 .agent/tmux.d/marks.json
+.agent/tmux.d/events/
+.agent/tmux.d/hooks/
 .agent/tmux.d/doctor/events.jsonl
 .agent/tmux.d/logs/
+.agent/board/
 ```
 
 The wrapper `.agent/tmux` may be committed. Runtime files should be ignored.

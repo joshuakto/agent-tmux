@@ -33,6 +33,21 @@ Use the project wrapper when present; otherwise replace `.agent/tmux` with `agen
 
 `prompt` creates a transcript mark before sending and prints it in the receipt. After `prompt`, use that mark for follow-up reads and waits. Marks are out-of-band transcript offsets; they are not typed into the terminal.
 
+## Manager-Agent Path
+
+When supervising other terminal agents, prefer events and board memos over repeated pane polling:
+
+```bash
+.agent/tmux launch --session <name> --agent claude --events --require-events --purpose <purpose> --run "claude --name <name>" --log
+.agent/tmux prompt <session> --agent claude "<instruction>"
+.agent/tmux events wait --session <session> --timeout 1800
+.agent/tmux board read <message-id>
+```
+
+For Codex CLI, use the same path with `--agent codex --run "codex"`. `--require-events` fails fast unless the session-local hook config is injected.
+
+Use `read`, `search`, and `attach` for recovery or evidence checks, not routine manager-agent notification. Events and board messages are coordination aids, not task truth.
+
 ## Decision Rules
 
 - Need to start shared work: `launch --log`, then `report`.
@@ -42,6 +57,7 @@ Use the project wrapper when present; otherwise replace `.agent/tmux` with `agen
 - Session seems missing or socket access fails: run `doctor`; do not conclude absence from a failed probe.
 - Human wants to inspect/interfere: report the `attach` command.
 - Need proof of completion: inspect artifacts/tests/branches, not logs or marks.
+- Supervising a worker agent: use `--require-events`, wait on `events`, then read the referenced board memo.
 
 ## Load References Only When Needed
 
@@ -49,6 +65,9 @@ Use the project wrapper when present; otherwise replace `.agent/tmux` with `agen
 - `references/recovery.md`: missing sessions, stale history, stuck processes, raw keys, logs, dumps, pane/window recovery.
 - `references/agent-profiles.md`: Claude/Codex/Gemini key behavior and profile actions.
 - `references/human-tmux.md`: attach, mouse scrolling, tmux profile, pane/window navigation for humans.
+- `references/manager-events.md`: event-driven manager-agent loop.
+- `references/board.md`: append-only message board for clean memos.
+- `references/hooks.md`: native hook ingestion and session-local Claude/Codex wiring.
 
 ## Reporting Contract
 
@@ -66,6 +85,6 @@ Keep reports compact. The goal is easy human attachment and easy agent recovery,
 ## Runtime Notes
 
 - Commit `.agent/tmux` if a project wants the convenience command.
-- Do not commit `.agent/tmux.sock` or `.agent/tmux.d/`.
+- Do not commit `.agent/tmux.sock`, `.agent/tmux.d/`, or `.agent/board/`.
 - The socket is project-local, but tmux persistence still depends on the tmux server process staying alive.
 - `doctor` writes intentional diagnostics under `.agent/tmux.d/doctor/events.jsonl`; use them to improve the tool, not as task status.

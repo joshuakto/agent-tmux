@@ -4,3 +4,4 @@ __pycache__/
 
 .agent/tmux.sock
 .agent/tmux.d/
+.agent/board/

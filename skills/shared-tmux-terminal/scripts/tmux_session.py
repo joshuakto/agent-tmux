@@ -4,6 +4,8 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
+import fcntl
 import json
 import os
 import re
@@ -12,6 +14,7 @@ import shutil
 import subprocess
 import sys
 import time
+import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -156,8 +159,51 @@ def marks_path(root: Path) -> Path:
     return root / ".agent" / "tmux.d" / "marks.json"
 
 
+def events_dir(root: Path) -> Path:
+    return root / ".agent" / "tmux.d" / "events" / "events"
+
+
+def events_ack_dir(root: Path) -> Path:
+    return root / ".agent" / "tmux.d" / "events" / "acks"
+
+
+def board_root(root: Path) -> Path:
+    return root / ".agent" / "board"
+
+
+def hooks_dir(root: Path, session: str) -> Path:
+    return root / ".agent" / "tmux.d" / "hooks" / slugify(session)
+
+
 def ensure_parent(path: Path) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
+
+
+def atomic_write_text(path: Path, text: str) -> None:
+    ensure_parent(path)
+    tmp = path.with_name(f".{path.name}.{os.getpid()}.{time.time_ns()}.{uuid.uuid4().hex}.tmp")
+    try:
+        tmp.write_text(text)
+        tmp.replace(path)
+    finally:
+        if tmp.exists():
+            tmp.unlink()
+
+
+@contextlib.contextmanager
+def file_lock(path: Path):
+    ensure_parent(path)
+    lock_path = path.with_suffix(path.suffix + ".lock")
+    with lock_path.open("a") as handle:
+        fcntl.flock(handle, fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(handle, fcntl.LOCK_UN)
+
+
+def write_json_atomic(path: Path, data: dict[str, Any], *, indent: int | None = 2) -> None:
+    atomic_write_text(path, json.dumps(data, indent=indent, sort_keys=True) + "\n")
 
 
 def load_registry(path: Path) -> dict[str, Any]:
@@ -179,10 +225,7 @@ def load_registry(path: Path) -> dict[str, Any]:
 
 
 def save_registry(path: Path, data: dict[str, Any]) -> None:
-    ensure_parent(path)
-    tmp = path.with_suffix(path.suffix + ".tmp")
-    tmp.write_text(json.dumps(data, indent=2, sort_keys=True) + "\n")
-    tmp.replace(path)
+    write_json_atomic(path, data)
 
 
 def load_marks(path: Path) -> dict[str, Any]:
@@ -202,10 +245,7 @@ def load_marks(path: Path) -> dict[str, Any]:
 
 
 def save_marks(path: Path, data: dict[str, Any]) -> None:
-    ensure_parent(path)
-    tmp = path.with_suffix(path.suffix + ".tmp")
-    tmp.write_text(json.dumps(data, indent=2, sort_keys=True) + "\n")
-    tmp.replace(path)
+    write_json_atomic(path, data)
 
 
 class TmuxError(RuntimeError):
@@ -298,6 +338,254 @@ def append_doctor_event(root: Path, event: dict[str, Any]) -> Path:
     with path.open("a") as handle:
         handle.write(json.dumps({"schema_version": 1, "timestamp": now_iso(), **event}, sort_keys=True) + "\n")
     return path
+
+
+def unique_record_id(prefix: str, *parts: str | None) -> str:
+    timestamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
+    clean_parts = [slugify(part) for part in parts if part]
+    clean_parts = [part for part in clean_parts if part]
+    suffix = uuid.uuid4().hex[:8]
+    return "_".join([prefix, timestamp, *clean_parts, suffix])
+
+
+def emit_event(root: Path, event: dict[str, Any]) -> dict[str, Any]:
+    record = {
+        "schema_version": 1,
+        "id": event.get("id") or unique_record_id("evt", event.get("session"), event.get("kind")),
+        "kind": event.get("kind") or "event",
+        "session": event.get("session"),
+        "agent": event.get("agent"),
+        "source": event.get("source") or "agent_tmux",
+        "confidence": event.get("confidence") or "explicit",
+        "summary": event.get("summary") or "",
+        "created_at": event.get("created_at") or now_iso(),
+        "read_command": event.get("read_command"),
+    }
+    for key, value in event.items():
+        if key not in record and value is not None:
+            record[key] = value
+    write_json_atomic(events_dir(root) / f"{record['id']}.json", record)
+    return record
+
+
+def load_event_file(path: Path) -> dict[str, Any] | None:
+    try:
+        data = json.loads(path.read_text())
+    except Exception:
+        return None
+    if not isinstance(data, dict):
+        return None
+    data.setdefault("id", path.stem)
+    return data
+
+
+def list_events(root: Path, *, session: str | None = None, unread: bool = False, consumer: str | None = None) -> list[dict[str, Any]]:
+    directory = events_dir(root)
+    if not directory.exists():
+        return []
+    entries: list[dict[str, Any]] = []
+    for path in sorted(directory.glob("*.json")):
+        event = load_event_file(path)
+        if event is None:
+            continue
+        if session and event.get("session") != session:
+            continue
+        if unread and event_is_acked(root, event["id"], consumer):
+            continue
+        entries.append(event)
+    return sorted(entries, key=lambda event: (str(event.get("created_at", "")), str(event.get("id", ""))))
+
+
+def default_consumer() -> str:
+    return slugify(os.environ.get("AGENT_TMUX_CONSUMER") or "manager")
+
+
+def ack_path(root: Path, event_id: str, consumer: str | None = None) -> Path:
+    return events_ack_dir(root) / slugify(consumer or default_consumer()) / f"{slugify(event_id)}.ack"
+
+
+def event_is_acked(root: Path, event_id: str, consumer: str | None = None) -> bool:
+    return ack_path(root, event_id, consumer).exists()
+
+
+def ack_event(root: Path, event_id: str, consumer: str | None = None) -> Path:
+    path = ack_path(root, event_id, consumer)
+    atomic_write_text(path, json.dumps({"event_id": event_id, "consumer": consumer or default_consumer(), "acked_at": now_iso()}, sort_keys=True) + "\n")
+    return path
+
+
+def print_event(event: dict[str, Any], *, json_output: bool = False) -> None:
+    if json_output:
+        print(json.dumps(event, sort_keys=True))
+        return
+    print(f"{event.get('id')}  {event.get('kind')}  session={event.get('session') or '-'}  source={event.get('source')}")
+    if event.get("summary"):
+        print(f"  {event['summary']}")
+    if event.get("read_command"):
+        print(f"  read: {event['read_command']}")
+
+
+def board_topic_dir(root: Path, topic: str) -> Path:
+    return board_root(root) / "threads" / slugify(topic)
+
+
+def board_message_path(root: Path, message_id: str) -> Path | None:
+    for path in (board_root(root) / "threads").glob(f"*/{message_id}.md"):
+        return path
+    return None
+
+
+def board_frontmatter_value(text: str, key: str) -> str:
+    if not text.startswith("---\n"):
+        return ""
+    for line in text.splitlines()[1:80]:
+        if line == "---":
+            break
+        if line.startswith(f"{key}:"):
+            return line.split(":", 1)[1].strip().strip('"')
+    return ""
+
+
+def list_board_messages(root: Path, *, topic: str | None = None) -> list[dict[str, str]]:
+    base = board_root(root) / "threads"
+    if not base.exists():
+        return []
+    paths = sorted((board_topic_dir(root, topic).glob("*.md") if topic else base.glob("*/*.md")))
+    messages: list[dict[str, str]] = []
+    for path in paths:
+        text = path.read_text(errors="replace")
+        messages.append(
+            {
+                "id": path.stem,
+                "topic": board_frontmatter_value(text, "topic") or path.parent.name,
+                "from": board_frontmatter_value(text, "from") or "",
+                "created_at": board_frontmatter_value(text, "created_at") or "",
+                "path": str(path),
+            }
+        )
+    return sorted(messages, key=lambda message: (message["created_at"], message["id"]))
+
+
+def hook_ingest_command(root: Path, agent: str, session: str, *, quiet: bool = False) -> str:
+    exe = Path(__file__).resolve()
+    parts = [
+        str(exe),
+        "--cwd",
+        str(root),
+        "hooks",
+        "ingest",
+        "--agent",
+        agent,
+        "--session",
+        session,
+    ]
+    if quiet:
+        parts.append("--quiet")
+    return " ".join(shlex.quote(part) for part in parts)
+
+
+def claude_hook_settings(root: Path, session: str) -> dict[str, Any]:
+    command = hook_ingest_command(root, "claude", session)
+    hook = {"type": "command", "command": command}
+    return {
+        "hooks": {
+            "Stop": [{"hooks": [hook]}],
+            "SubagentStop": [{"hooks": [hook]}],
+            "StopFailure": [{"hooks": [hook]}],
+            "Notification": [{"hooks": [hook]}],
+            "PermissionRequest": [{"hooks": [hook]}],
+        }
+    }
+
+
+CODEX_HOOK_EVENTS = ["SessionStart", "UserPromptSubmit", "Stop", "PermissionRequest"]
+
+
+def toml_string(value: str) -> str:
+    return json.dumps(value)
+
+
+def codex_hooks_toml(root: Path, session: str) -> str:
+    command = hook_ingest_command(root, "codex", session, quiet=True)
+    hook = f'{{type="command", command={toml_string(command)}}}'
+    group = f"{{hooks=[{hook}]}}"
+    entries = [f"{event}=[{group}]" for event in CODEX_HOOK_EVENTS]
+    return "hooks={" + ",".join(entries) + "}"
+
+
+def write_hook_settings(root: Path, agent: str, session: str) -> tuple[Path | None, str, str | None, dict[str, Any]]:
+    profile_name, _profile = resolve_profile(agent)
+    if profile_name == "claude":
+        settings_path = hooks_dir(root, session) / "claude-settings.json"
+        write_json_atomic(settings_path, claude_hook_settings(root, session))
+        return settings_path, "native-hook", None, {"mode": "settings-file"}
+    if profile_name == "codex":
+        config_value = codex_hooks_toml(root, session)
+        config_path = hooks_dir(root, session) / "codex-hooks.toml"
+        atomic_write_text(config_path, config_value + "\n")
+        return config_path, "native-hook", None, {"mode": "wrapper-cli-config", "config_path": str(config_path)}
+    return None, "unsupported-agent", f"native hook wiring is not implemented for agent profile: {profile_name}", {}
+
+
+def wire_claude_run_command(run: str | None, settings_path: Path | None) -> tuple[str | None, bool, str | None]:
+    if not run or settings_path is None:
+        return run, False, "no run command to wire" if not run else "no settings path"
+    try:
+        tokens = shlex.split(run)
+    except ValueError as exc:
+        return run, False, f"could not parse --run for hook wiring: {exc}"
+    if not tokens or Path(tokens[0]).name != "claude":
+        return run, False, "run command is not a simple claude invocation"
+    if any(token == "--settings" or token.startswith("--settings=") for token in tokens):
+        return run, False, "run command already contains --settings"
+    tokens[1:1] = ["--settings", str(settings_path)]
+    return shlex.join(tokens), True, None
+
+
+def run_has_codex_hooks_override(tokens: list[str]) -> bool:
+    index = 1
+    while index < len(tokens):
+        token = tokens[index]
+        if token in {"-c", "--config"} and index + 1 < len(tokens):
+            if tokens[index + 1].startswith("hooks"):
+                return True
+            index += 2
+            continue
+        if token.startswith("--config=") and token.split("=", 1)[1].startswith("hooks"):
+            return True
+        index += 1
+    return False
+
+
+def write_codex_wrapper(root: Path, session: str, codex_program: str, config_path: Path) -> Path:
+    wrapper_path = hooks_dir(root, session) / "codex-with-hooks"
+    script = "\n".join(
+        [
+            "#!/usr/bin/env bash",
+            "set -euo pipefail",
+            f"exec {shlex.quote(codex_program)} -c \"$(cat {shlex.quote(str(config_path))})\" \"$@\"",
+            "",
+        ]
+    )
+    atomic_write_text(wrapper_path, script)
+    wrapper_path.chmod(0o755)
+    return wrapper_path
+
+
+def wire_codex_run_command(root: Path, session: str, run: str | None, config_path: Path | None) -> tuple[str | None, bool, str | None]:
+    if not run or not config_path:
+        return run, False, "no run command to wire" if not run else "no Codex hooks config"
+    try:
+        tokens = shlex.split(run)
+    except ValueError as exc:
+        return run, False, f"could not parse --run for hook wiring: {exc}"
+    if not tokens or Path(tokens[0]).name != "codex":
+        return run, False, "run command is not a simple codex invocation"
+    if run_has_codex_hooks_override(tokens):
+        return run, False, "run command already configures hooks"
+    wrapper_path = write_codex_wrapper(root, session, tokens[0], config_path)
+    tokens[0] = str(wrapper_path)
+    return shlex.join(tokens), True, None
 
 
 def session_exists(socket: Path, session: str) -> bool:
@@ -608,20 +896,21 @@ def create_mark(
         log_path.touch()
 
     marks_file = marks_path(root)
-    marks = load_marks(marks_file)
-    mark_id = unique_mark_id(marks, target, label)
-    entry = {
-        "id": mark_id,
-        "label": label,
-        "session": session_name_from_target(session, target),
-        "target": target,
-        "log_path": str(log_path),
-        "offset": log_path.stat().st_size,
-        "created_at": now_iso(),
-    }
-    marks.setdefault("marks", {})[mark_id] = entry
-    marks.setdefault("latest_by_target", {})[target] = mark_id
-    save_marks(marks_file, marks)
+    with file_lock(marks_file):
+        marks = load_marks(marks_file)
+        mark_id = unique_mark_id(marks, target, label)
+        entry = {
+            "id": mark_id,
+            "label": label,
+            "session": session_name_from_target(session, target),
+            "target": target,
+            "log_path": str(log_path),
+            "offset": log_path.stat().st_size,
+            "created_at": now_iso(),
+        }
+        marks.setdefault("marks", {})[mark_id] = entry
+        marks.setdefault("latest_by_target", {})[target] = mark_id
+        save_marks(marks_file, marks)
     return mark_id, entry, registry_changed
 
 
@@ -709,6 +998,8 @@ def update_registry_entry(
     purpose: str | None,
     cwd: str,
     run: str | None,
+    agent: str | None = None,
+    events: dict[str, Any] | None = None,
 ) -> None:
     registry["project_root"] = str(root)
     registry["socket"] = str(socket)
@@ -719,16 +1010,36 @@ def update_registry_entry(
             "purpose": purpose or entry.get("purpose"),
             "cwd": cwd,
             "run": run or entry.get("run"),
+            "agent": agent or entry.get("agent"),
             "socket": str(socket),
             "created_at": entry.get("created_at", now_iso()),
             "last_seen_at": now_iso(),
         }
     )
+    if events is not None:
+        entry["events"] = events
     sessions[session] = entry
 
 
 def remove_registry_entry(registry: dict[str, Any], session: str) -> None:
     registry.get("sessions", {}).pop(session, None)
+
+
+def save_registry_session(path: Path, registry: dict[str, Any], session: str) -> None:
+    with file_lock(path):
+        latest = load_registry(path)
+        latest["schema_version"] = registry.get("schema_version", latest.get("schema_version", 1))
+        latest["project_root"] = registry.get("project_root", latest.get("project_root"))
+        latest["socket"] = registry.get("socket", latest.get("socket"))
+        latest.setdefault("sessions", {})[session] = registry.get("sessions", {}).get(session, {})
+        save_registry(path, latest)
+
+
+def remove_registry_session(path: Path, session: str) -> None:
+    with file_lock(path):
+        registry = load_registry(path)
+        remove_registry_entry(registry, session)
+        save_registry(path, registry)
 
 
 def launch(args: argparse.Namespace) -> int:
@@ -739,11 +1050,51 @@ def launch(args: argparse.Namespace) -> int:
     registry = load_registry(registry_file)
 
     session = args.session or slugify(f"{root.name}-{args.purpose or 'agent'}-{datetime.now().strftime('%H%M%S')}")
-    if session_exists(socket, session):
-        mode = "reused"
-    else:
-        run_tmux(socket, ["new-session", "-Ad", "-s", session, "-c", str(root)])
-        mode = "started"
+    effective_run = args.run
+    events_info: dict[str, Any] | None = None
+    hook_warning: str | None = None
+    if args.require_events:
+        args.events = True
+    if args.events:
+        if not args.agent:
+            events_info = {"requested": True, "status": "missing-agent", "warning": "pass --agent to enable native hook wiring"}
+            hook_warning = events_info["warning"]
+        else:
+            settings_path, status, warning, hook_config = write_hook_settings(root, args.agent, session)
+            events_info = {"requested": True, "status": status, "agent": resolve_profile(args.agent)[0]}
+            if settings_path is not None:
+                events_info["settings_path"] = str(settings_path)
+            if hook_config.get("mode"):
+                events_info["mode"] = hook_config["mode"]
+            if warning:
+                events_info["warning"] = warning
+                hook_warning = warning
+            if settings_path is not None:
+                if events_info["agent"] == "claude":
+                    effective_run, wired, run_warning = wire_claude_run_command(args.run, settings_path)
+                elif events_info["agent"] == "codex":
+                    effective_run, wired, run_warning = wire_codex_run_command(root, session, args.run, settings_path)
+                else:
+                    wired, run_warning = False, f"native hook run wiring is not implemented for agent profile: {events_info['agent']}"
+                events_info["run_wired"] = wired
+                if run_warning:
+                    events_info["run_warning"] = run_warning
+                    hook_warning = run_warning
+    if args.require_events:
+        if not events_info:
+            raise SystemExit("--require-events needs --events and --agent")
+        if events_info.get("status") != "native-hook":
+            raise SystemExit(f"--require-events failed: {events_info.get('warning') or events_info.get('status')}")
+        if not events_info.get("run_wired"):
+            reason = events_info.get("run_warning") or "native hook settings were not injected into the launch command"
+            raise SystemExit(f"--require-events failed: {reason}")
+
+    with file_lock(registry_file):
+        if session_exists(socket, session):
+            mode = "reused"
+        else:
+            run_tmux(socket, ["new-session", "-Ad", "-s", session, "-c", str(root)])
+            mode = "started"
 
     log_path: Path | None = None
     if args.log:
@@ -759,11 +1110,11 @@ def launch(args: argparse.Namespace) -> int:
             {"path": str(log_path), "started_at": now_iso(), "stopped_at": None},
         )
 
-    if args.run:
+    if effective_run:
         if mode == "started" and args.run_delay > 0:
             time.sleep(args.run_delay)
         target = active_pane_target(session, list_panes(socket, session))
-        send_text(socket, target, args.run)
+        send_text(socket, target, effective_run)
         run_tmux(socket, ["send-keys", "-t", target, "Enter"])
 
     update_registry_entry(
@@ -773,9 +1124,23 @@ def launch(args: argparse.Namespace) -> int:
         session,
         purpose=args.purpose,
         cwd=str(root),
-        run=args.run,
+        run=effective_run,
+        agent=args.agent,
+        events=events_info,
     )
-    save_registry(registry_file, registry)
+    save_registry_session(registry_file, registry, session)
+    emit_event(
+        root,
+        {
+            "kind": "session_started" if mode == "started" else "session_reused",
+            "session": session,
+            "agent": args.agent,
+            "source": "agent_tmux",
+            "confidence": "explicit",
+            "summary": f"{mode}: {session}",
+            "read_command": user_command(root, f"status {session}"),
+        },
+    )
 
     panes = list_panes(socket, session)
     print(f"{mode}: {session}")
@@ -786,6 +1151,15 @@ def launch(args: argparse.Namespace) -> int:
     print(f"registry: {registry_file}")
     if log_path:
         print(f"log: {log_path}")
+    if events_info is not None:
+        print(f"events: {events_info.get('status')}")
+        if events_info.get("mode"):
+            print(f"event mode: {events_info['mode']}")
+        if events_info.get("settings_path"):
+            label = "hook settings" if events_info.get("mode") == "settings-file" else "hook config"
+            print(f"{label}: {events_info['settings_path']}")
+        if hook_warning:
+            print(f"hook warning: {hook_warning}")
     print(f"windows: {len({pane['window_index'] for pane in panes})}  panes: {len(panes)}")
     for pane in panes:
         marker = "*" if pane["active"] else " "
@@ -793,8 +1167,8 @@ def launch(args: argparse.Namespace) -> int:
             f"  {marker} {session}:{pane['window_index']}.{pane['pane_index']} "
             f"{pane['pane_id']} {pane['command']} \"{pane['title']}\""
         )
-    if args.run:
-        print(f"initial command sent: {args.run}")
+    if effective_run:
+        print(f"initial command sent: {effective_run}")
     if args.attach:
         os.execvp("tmux", ["tmux", "-S", str(socket), "attach", "-t", session])
     return 0
@@ -1038,7 +1412,7 @@ def wait_cmd(args: argparse.Namespace) -> int:
             target = target_for_args(socket, args.session, args.pane)
             log_path, changed = ensure_transcript(root, socket, registry, args.session, target)
             if changed:
-                save_registry(registry_file, registry)
+                save_registry_session(registry_file, registry, session_name_from_target(args.session, target))
             ensure_parent(log_path)
             if not log_path.exists():
                 log_path.touch()
@@ -1097,7 +1471,7 @@ def prompt_cmd(args: argparse.Namespace) -> int:
             label=args.mark_label or "prompt",
         )
         if changed:
-            save_registry(registry_file, registry)
+            save_registry_session(registry_file, registry, session_name_from_target(args.session, target))
     send_text(socket, target, args.text)
     if args.submit:
         send_profile_action(socket, target, profile, "submit")
@@ -1115,7 +1489,7 @@ def mark_cmd(args: argparse.Namespace) -> int:
     target = target_for_args(socket, args.session, args.pane)
     mark_id, mark, changed = create_mark(root, socket, registry, args.session, target, label=args.label)
     if changed:
-        save_registry(registry_file, registry)
+        save_registry_session(registry_file, registry, session_name_from_target(args.session, target))
     print(f"mark created: {mark_id}")
     print(f"target: {mark['target']}")
     print(f"log: {mark['log_path']}")
@@ -1148,6 +1522,231 @@ def profiles_cmd(args: argparse.Namespace) -> int:
         aliases = ", ".join(profile.get("aliases", []))
         print(f"{profile_name}: actions={', '.join(sorted(profile.get('actions', {})))} aliases={aliases}")
     return 0
+
+
+def events_cmd(args: argparse.Namespace) -> int:
+    root = project_root(Path(args.cwd) if args.cwd else None)
+    consumer = getattr(args, "consumer", None) or default_consumer()
+
+    if args.events_action == "emit":
+        event: dict[str, Any] = {}
+        json_input = getattr(args, "json_input", None)
+        if json_input:
+            if json_input == "-":
+                event = json.loads(sys.stdin.read() or "{}")
+            else:
+                event = json.loads(Path(json_input).expanduser().read_text())
+            if not isinstance(event, dict):
+                raise SystemExit("--json must provide a JSON object")
+        if args.kind:
+            event["kind"] = args.kind
+        if args.session:
+            event["session"] = args.session
+        if args.agent:
+            event["agent"] = args.agent
+        if args.summary:
+            event["summary"] = args.summary
+        if args.source:
+            event["source"] = args.source
+        if args.confidence:
+            event["confidence"] = args.confidence
+        if args.read_command:
+            event["read_command"] = args.read_command
+        if not event.get("kind"):
+            raise SystemExit("events emit requires --kind or a JSON object with kind")
+        record = emit_event(root, event)
+        print_event(record, json_output=args.json)
+        return 0
+
+    if args.events_action == "list":
+        events = list_events(root, session=args.session, unread=args.unread, consumer=consumer)
+        if args.limit and len(events) > args.limit:
+            events = events[-args.limit :]
+        if args.json:
+            print(json.dumps(events, sort_keys=True))
+            return 0
+        for event in events:
+            print_event(event)
+        return 0 if events else 1
+
+    if args.events_action == "wait":
+        deadline = time.monotonic() + args.timeout
+        while True:
+            events = list_events(root, session=args.session, unread=True, consumer=consumer)
+            if events:
+                event = events[0]
+                if args.ack:
+                    ack_event(root, event["id"], consumer)
+                print_event(event, json_output=args.json)
+                return 0
+            if time.monotonic() >= deadline:
+                if not args.quiet:
+                    print("timeout waiting for event")
+                return 1
+            time.sleep(args.interval)
+
+    if args.events_action == "ack":
+        path = ack_event(root, args.event_id, consumer)
+        print(f"acked: {args.event_id}")
+        print(path)
+        return 0
+
+    raise SystemExit(f"unknown events action: {args.events_action}")
+
+
+def board_cmd(args: argparse.Namespace) -> int:
+    root = project_root(Path(args.cwd) if args.cwd else None)
+
+    if args.board_action == "post":
+        if args.body_file:
+            body_path = Path(args.body_file).expanduser()
+            body = body_path.read_text()
+        elif args.body is not None:
+            body = args.body
+        else:
+            body = sys.stdin.read()
+        if not body.strip():
+            raise SystemExit("board post requires non-empty body text")
+        message_id = unique_record_id("msg", args.topic, args.from_agent)
+        created_at = now_iso()
+        metadata = {
+            "id": message_id,
+            "from": args.from_agent,
+            "topic": args.topic,
+            "created_at": created_at,
+        }
+        frontmatter = "\n".join(["---", *[f'{key}: "{value}"' for key, value in metadata.items()], "---", ""])
+        content = frontmatter + body.rstrip() + "\n"
+        path = board_topic_dir(root, args.topic) / f"{message_id}.md"
+        atomic_write_text(path, content)
+        read_command = user_command(root, f"board read {message_id}")
+        emit_event(
+            root,
+            {
+                "kind": "board_post",
+                "session": args.session,
+                "agent": args.from_agent,
+                "source": "agent_tmux",
+                "confidence": "explicit",
+                "summary": f"{args.from_agent} posted to {args.topic}",
+                "read_command": read_command,
+                "message_id": message_id,
+                "topic": args.topic,
+                "path": str(path),
+            },
+        )
+        print(f"posted: {message_id}")
+        print(f"topic: {args.topic}")
+        print(f"path: {path}")
+        print(f"read: {read_command}")
+        return 0
+
+    if args.board_action == "list":
+        messages = list_board_messages(root, topic=args.topic)
+        if args.json:
+            print(json.dumps(messages, sort_keys=True))
+            return 0
+        for message in messages:
+            print(f"{message['id']}  topic={message['topic']}  from={message['from']}  created_at={message['created_at']}")
+        return 0 if messages else 1
+
+    if args.board_action == "read":
+        path = board_message_path(root, args.message_id)
+        if path is None:
+            raise SystemExit(f"board message not found: {args.message_id}")
+        print(path.read_text(), end="")
+        return 0
+
+    raise SystemExit(f"unknown board action: {args.board_action}")
+
+
+def hook_kind(agent: str, payload: dict[str, Any]) -> tuple[str, str]:
+    event_name = str(payload.get("hook_event_name") or payload.get("event") or payload.get("type") or "")
+    event_lower = re.sub(r"[^a-z0-9]+", "", event_name.lower())
+    message = str(payload.get("message") or payload.get("reason") or payload.get("tool_name") or "").strip()
+    if event_lower in {"stop", "subagentstop", "afteragent"}:
+        return "agent_stop", message or f"{agent} turn ended"
+    if event_lower in {"stopfailure"}:
+        return "hook_error", message or f"{agent} stop hook failure"
+    if event_lower in {"notification"}:
+        return "needs_input", message or f"{agent} notification"
+    if event_lower in {"permissionrequest"}:
+        return "permission_request", message or f"{agent} permission request"
+    if event_lower in {"sessionstart"}:
+        return "session_started", message or f"{agent} session started"
+    if event_lower in {"userpromptsubmit"}:
+        return "prompt_submitted", message or f"{agent} prompt submitted"
+    if event_lower in {"pretooluse", "posttooluse"}:
+        return "tool_event", message or f"{agent} tool event"
+    return "agent_event", message or f"{agent} hook event: {event_name or 'unknown'}"
+
+
+def hooks_cmd(args: argparse.Namespace) -> int:
+    root = project_root(Path(args.cwd) if args.cwd else None)
+
+    if args.hooks_action == "ingest":
+        payload_text = sys.stdin.read()
+        payload: dict[str, Any] = {}
+        if payload_text.strip():
+            try:
+                parsed = json.loads(payload_text)
+            except json.JSONDecodeError as exc:
+                parsed = {"hook_event_name": "HookParseError", "message": str(exc)}
+            if isinstance(parsed, dict):
+                payload = parsed
+        profile_name, _profile = resolve_profile(args.agent)
+        kind, summary = hook_kind(profile_name, payload)
+        emit_event(
+            root,
+            {
+                "kind": kind,
+                "session": args.session,
+                "agent": profile_name,
+                "source": "native_hook",
+                "confidence": "native_hook",
+                "summary": summary,
+                "read_command": user_command(root, f"read {args.session} --lines 120"),
+                "hook_event_name": payload.get("hook_event_name") or payload.get("event") or payload.get("type"),
+                "tool_name": payload.get("tool_name"),
+                "notification_type": payload.get("notification_type"),
+                "cwd": payload.get("cwd"),
+            },
+        )
+        if not args.quiet:
+            print(json.dumps({"continue": True, "suppressOutput": True}, sort_keys=True))
+        return 0
+
+    if args.hooks_action == "show-config":
+        profile_name, _profile = resolve_profile(args.agent)
+        if profile_name == "claude":
+            print(json.dumps(claude_hook_settings(root, args.session), indent=2, sort_keys=True))
+            return 0
+        if profile_name == "codex":
+            print(codex_hooks_toml(root, args.session))
+            return 0
+        raise SystemExit(f"show-config is only implemented for claude and codex, not {profile_name}")
+
+    if args.hooks_action == "status":
+        registry = load_registry(registry_path(root))
+        reg = registry.get("sessions", {}).get(args.session, {})
+        events_info = reg.get("events") or {}
+        print(f"Session: {args.session}")
+        print(f"Events: {events_info.get('status', 'not configured')}")
+        if events_info.get("agent"):
+            print(f"Agent: {events_info['agent']}")
+        if events_info.get("mode"):
+            print(f"Mode: {events_info['mode']}")
+        if events_info.get("settings_path"):
+            path = Path(events_info["settings_path"])
+            label = "Settings" if events_info.get("mode") == "settings-file" else "Config"
+            print(f"{label}: {path} ({'exists' if path.exists() else 'missing'})")
+        if events_info.get("warning"):
+            print(f"Warning: {events_info['warning']}")
+        if events_info.get("run_warning"):
+            print(f"Run warning: {events_info['run_warning']}")
+        return 0
+
+    raise SystemExit(f"unknown hooks action: {args.hooks_action}")
 
 
 def tmux_profile_cmd(args: argparse.Namespace) -> int:
@@ -1188,7 +1787,7 @@ def log_cmd(args: argparse.Namespace) -> int:
             target,
             {"path": str(output_path), "started_at": now_iso(), "stopped_at": None},
         )
-        save_registry(registry_file, registry)
+        save_registry_session(registry_file, registry, session)
         print(f"log started: {target}")
         print(output_path)
         return 0
@@ -1196,7 +1795,7 @@ def log_cmd(args: argparse.Namespace) -> int:
     if args.log_action == "stop":
         stop_transcript(socket, target)
         update_log_registry(registry, session, target, {"stopped_at": now_iso()})
-        save_registry(registry_file, registry)
+        save_registry_session(registry_file, registry, session)
         print(f"log stopped: {target}")
         return 0
 
@@ -1332,9 +1931,7 @@ def kill_cmd(args: argparse.Namespace) -> int:
     socket = socket_path(root, args.socket)
     run_tmux(socket, ["kill-session", "-t", args.session])
     registry_file = registry_path(root)
-    registry = load_registry(registry_file)
-    remove_registry_entry(registry, args.session)
-    save_registry(registry_file, registry)
+    remove_registry_session(registry_file, args.session)
     return 0
 
 
@@ -1418,6 +2015,9 @@ def parser() -> argparse.ArgumentParser:
     launch_cmd.add_argument("--session", help="Session name to create or reuse")
     launch_cmd.add_argument("--purpose", help="Short purpose label stored in the registry")
     launch_cmd.add_argument("--run", help="Literal command to send after launch")
+    launch_cmd.add_argument("--agent", help="Agent profile for the launched process, e.g. claude, codex, gemini")
+    launch_cmd.add_argument("--events", action="store_true", help="Enable native event hook wiring for supported agents")
+    launch_cmd.add_argument("--require-events", action="store_true", help="Fail launch unless native event hook wiring is verified")
     launch_cmd.add_argument("--run-delay", type=float, default=0.5, help="Seconds to wait before sending --run to a newly started shell")
     launch_cmd.add_argument("--log", action="store_true", help="Start transcript logging for the active pane")
     launch_cmd.add_argument("--log-output", help="Transcript path; defaults under .agent/tmux.d/logs/")
@@ -1529,6 +2129,72 @@ def parser() -> argparse.ArgumentParser:
     profiles = command("profiles", help="List terminal-agent interaction profiles")
     profiles.add_argument("--agent", help="Show one profile")
     profiles.set_defaults(func=profiles_cmd)
+
+    events = command("events", help="Emit, list, wait for, and acknowledge manager-agent events")
+    events_sub = events.add_subparsers(dest="events_action", required=True)
+    events_emit = events_sub.add_parser("emit", help="Append a canonical event")
+    events_emit.add_argument("--kind", help="Event kind, e.g. agent_stop, needs_input, board_post")
+    events_emit.add_argument("--session", help="Related tmux session")
+    events_emit.add_argument("--agent", help="Related agent profile/name")
+    events_emit.add_argument("--summary", help="Short event summary")
+    events_emit.add_argument("--source", default="agent_tmux", help="Event source")
+    events_emit.add_argument("--confidence", default="explicit", help="Event confidence")
+    events_emit.add_argument("--read-command", help="Command that reads related details")
+    events_emit.add_argument("--json", dest="json_input", help="Read event JSON object from path or '-'")
+    events_emit.add_argument("--json-output", dest="json", action="store_true", help="Print event as JSON")
+    events_emit.set_defaults(func=events_cmd)
+    events_list = events_sub.add_parser("list", help="List events")
+    events_list.add_argument("--session", help="Filter by session")
+    events_list.add_argument("--unread", action="store_true", help="Only show events not acked by this consumer")
+    events_list.add_argument("--consumer", help="Consumer name for unread filtering")
+    events_list.add_argument("--limit", type=int, default=50)
+    events_list.add_argument("--json", action="store_true")
+    events_list.set_defaults(func=events_cmd)
+    events_wait = events_sub.add_parser("wait", help="Wait for the next unread event")
+    events_wait.add_argument("--session", help="Filter by session")
+    events_wait.add_argument("--timeout", type=float, default=1800)
+    events_wait.add_argument("--interval", type=float, default=1.0)
+    events_wait.add_argument("--consumer", help="Consumer name for unread filtering")
+    events_wait.add_argument("--ack", action="store_true", help="Ack the event before returning")
+    events_wait.add_argument("--json", action="store_true")
+    events_wait.add_argument("--quiet", action="store_true")
+    events_wait.set_defaults(func=events_cmd)
+    events_ack = events_sub.add_parser("ack", help="Acknowledge an event for a consumer")
+    events_ack.add_argument("event_id")
+    events_ack.add_argument("--consumer", help="Consumer name")
+    events_ack.set_defaults(func=events_cmd)
+
+    board = command("board", help="Append-only message board for durable agent memos")
+    board_sub = board.add_subparsers(dest="board_action", required=True)
+    board_post = board_sub.add_parser("post", help="Post one immutable Markdown message")
+    board_post.add_argument("--topic", required=True)
+    board_post.add_argument("--from", dest="from_agent", required=True)
+    board_post.add_argument("--session", help="Related tmux session")
+    board_post.add_argument("--body-file", help="Read message body from a file")
+    board_post.add_argument("body", nargs="?", help="Message body; stdin is used if omitted")
+    board_post.set_defaults(func=board_cmd)
+    board_list = board_sub.add_parser("list", help="List board messages")
+    board_list.add_argument("--topic")
+    board_list.add_argument("--json", action="store_true")
+    board_list.set_defaults(func=board_cmd)
+    board_read = board_sub.add_parser("read", help="Read one board message by id")
+    board_read.add_argument("message_id")
+    board_read.set_defaults(func=board_cmd)
+
+    hooks = command("hooks", help="Native terminal-agent hook adapter")
+    hooks_sub = hooks.add_subparsers(dest="hooks_action", required=True)
+    hooks_ingest = hooks_sub.add_parser("ingest", help="Read vendor hook JSON from stdin and emit a canonical event")
+    hooks_ingest.add_argument("--agent", required=True)
+    hooks_ingest.add_argument("--session", required=True)
+    hooks_ingest.add_argument("--quiet", action="store_true")
+    hooks_ingest.set_defaults(func=hooks_cmd)
+    hooks_show = hooks_sub.add_parser("show-config", help="Print hook config for a supported agent")
+    hooks_show.add_argument("--agent", required=True)
+    hooks_show.add_argument("--session", required=True)
+    hooks_show.set_defaults(func=hooks_cmd)
+    hooks_status = hooks_sub.add_parser("status", help="Show stored hook wiring status for a session")
+    hooks_status.add_argument("session")
+    hooks_status.set_defaults(func=hooks_cmd)
 
     tmux_profile = command("tmux-profile", help="Show or apply the project-local tmux ergonomics profile")
     tmux_profile_sub = tmux_profile.add_subparsers(dest="profile_action", required=True)
