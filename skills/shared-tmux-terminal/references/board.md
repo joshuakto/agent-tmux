@@ -12,6 +12,7 @@ agent-tmux board read <message-id>
 ```
 
 `board post` writes one immutable Markdown file and emits a `board_post` event.
+When run inside a managed tmux pane, it auto-associates the post with that session. Use `--session` only when posting from outside the pane or overriding the association.
 
 ## Storage
 

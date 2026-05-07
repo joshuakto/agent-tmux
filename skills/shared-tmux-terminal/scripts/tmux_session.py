@@ -379,7 +379,15 @@ def load_event_file(path: Path) -> dict[str, Any] | None:
     return data
 
 
-def list_events(root: Path, *, session: str | None = None, unread: bool = False, consumer: str | None = None) -> list[dict[str, Any]]:
+def list_events(
+    root: Path,
+    *,
+    session: str | None = None,
+    kind: str | None = None,
+    topic: str | None = None,
+    unread: bool = False,
+    consumer: str | None = None,
+) -> list[dict[str, Any]]:
     directory = events_dir(root)
     if not directory.exists():
         return []
@@ -388,12 +396,28 @@ def list_events(root: Path, *, session: str | None = None, unread: bool = False,
         event = load_event_file(path)
         if event is None:
             continue
-        if session and event.get("session") != session:
+        if not event_matches_filters(event, session=session, kind=kind, topic=topic):
             continue
         if unread and event_is_acked(root, event["id"], consumer):
             continue
         entries.append(event)
     return sorted(entries, key=lambda event: (str(event.get("created_at", "")), str(event.get("id", ""))))
+
+
+def event_matches_filters(
+    event: dict[str, Any],
+    *,
+    session: str | None = None,
+    kind: str | None = None,
+    topic: str | None = None,
+) -> bool:
+    if session and event.get("session") != session:
+        return False
+    if kind and event.get("kind") != kind:
+        return False
+    if topic and event.get("topic") != topic:
+        return False
+    return True
 
 
 def default_consumer() -> str:
@@ -459,6 +483,7 @@ def list_board_messages(root: Path, *, topic: str | None = None) -> list[dict[st
                 "id": path.stem,
                 "topic": board_frontmatter_value(text, "topic") or path.parent.name,
                 "from": board_frontmatter_value(text, "from") or "",
+                "session": board_frontmatter_value(text, "session") or "",
                 "created_at": board_frontmatter_value(text, "created_at") or "",
                 "path": str(path),
             }
@@ -655,6 +680,26 @@ def list_panes(socket: Path, session: str) -> list[dict[str, Any]]:
             }
         )
     return panes
+
+
+def infer_current_tmux_session(socket: Path) -> str | None:
+    pane_id = os.environ.get("TMUX_PANE")
+    if not pane_id:
+        return None
+    try:
+        out = tmux_output(socket, ["list-panes", "-a", "-F", "#{session_name}\t#{pane_id}"])
+    except TmuxError:
+        return None
+    for line in out.splitlines():
+        if not line.strip():
+            continue
+        try:
+            session_name, current_pane_id = line.split("\t", 1)
+        except ValueError:
+            continue
+        if current_pane_id == pane_id:
+            return session_name
+    return None
 
 
 def capture_pane(
@@ -1526,6 +1571,7 @@ def profiles_cmd(args: argparse.Namespace) -> int:
 
 def events_cmd(args: argparse.Namespace) -> int:
     root = project_root(Path(args.cwd) if args.cwd else None)
+    socket = socket_path(root, getattr(args, "socket", None))
     consumer = getattr(args, "consumer", None) or default_consumer()
 
     if args.events_action == "emit":
@@ -1542,6 +1588,10 @@ def events_cmd(args: argparse.Namespace) -> int:
             event["kind"] = args.kind
         if args.session:
             event["session"] = args.session
+        if not event.get("session"):
+            inferred_session = infer_current_tmux_session(socket)
+            if inferred_session:
+                event["session"] = inferred_session
         if args.agent:
             event["agent"] = args.agent
         if args.summary:
@@ -1559,7 +1609,14 @@ def events_cmd(args: argparse.Namespace) -> int:
         return 0
 
     if args.events_action == "list":
-        events = list_events(root, session=args.session, unread=args.unread, consumer=consumer)
+        events = list_events(
+            root,
+            session=args.session,
+            kind=args.kind,
+            topic=args.topic,
+            unread=args.unread,
+            consumer=consumer,
+        )
         if args.limit and len(events) > args.limit:
             events = events[-args.limit :]
         if args.json:
@@ -1572,7 +1629,14 @@ def events_cmd(args: argparse.Namespace) -> int:
     if args.events_action == "wait":
         deadline = time.monotonic() + args.timeout
         while True:
-            events = list_events(root, session=args.session, unread=True, consumer=consumer)
+            events = list_events(
+                root,
+                session=args.session,
+                kind=args.kind,
+                topic=args.topic,
+                unread=True,
+                consumer=consumer,
+            )
             if events:
                 event = events[0]
                 if args.ack:
@@ -1596,8 +1660,10 @@ def events_cmd(args: argparse.Namespace) -> int:
 
 def board_cmd(args: argparse.Namespace) -> int:
     root = project_root(Path(args.cwd) if args.cwd else None)
+    socket = socket_path(root, getattr(args, "socket", None))
 
     if args.board_action == "post":
+        session = args.session or infer_current_tmux_session(socket)
         if args.body_file:
             body_path = Path(args.body_file).expanduser()
             body = body_path.read_text()
@@ -1615,6 +1681,8 @@ def board_cmd(args: argparse.Namespace) -> int:
             "topic": args.topic,
             "created_at": created_at,
         }
+        if session:
+            metadata["session"] = session
         frontmatter = "\n".join(["---", *[f'{key}: "{value}"' for key, value in metadata.items()], "---", ""])
         content = frontmatter + body.rstrip() + "\n"
         path = board_topic_dir(root, args.topic) / f"{message_id}.md"
@@ -1624,7 +1692,7 @@ def board_cmd(args: argparse.Namespace) -> int:
             root,
             {
                 "kind": "board_post",
-                "session": args.session,
+                "session": session,
                 "agent": args.from_agent,
                 "source": "agent_tmux",
                 "confidence": "explicit",
@@ -1637,6 +1705,8 @@ def board_cmd(args: argparse.Namespace) -> int:
         )
         print(f"posted: {message_id}")
         print(f"topic: {args.topic}")
+        if session:
+            print(f"session: {session}")
         print(f"path: {path}")
         print(f"read: {read_command}")
         return 0
@@ -1647,7 +1717,11 @@ def board_cmd(args: argparse.Namespace) -> int:
             print(json.dumps(messages, sort_keys=True))
             return 0
         for message in messages:
-            print(f"{message['id']}  topic={message['topic']}  from={message['from']}  created_at={message['created_at']}")
+            session_part = f"  session={message['session']}" if message.get("session") else ""
+            print(
+                f"{message['id']}  topic={message['topic']}  "
+                f"from={message['from']}{session_part}  created_at={message['created_at']}"
+            )
         return 0 if messages else 1
 
     if args.board_action == "read":
@@ -2145,6 +2219,8 @@ def parser() -> argparse.ArgumentParser:
     events_emit.set_defaults(func=events_cmd)
     events_list = events_sub.add_parser("list", help="List events")
     events_list.add_argument("--session", help="Filter by session")
+    events_list.add_argument("--kind", help="Filter by event kind")
+    events_list.add_argument("--topic", help="Filter by board/event topic")
     events_list.add_argument("--unread", action="store_true", help="Only show events not acked by this consumer")
     events_list.add_argument("--consumer", help="Consumer name for unread filtering")
     events_list.add_argument("--limit", type=int, default=50)
@@ -2152,6 +2228,8 @@ def parser() -> argparse.ArgumentParser:
     events_list.set_defaults(func=events_cmd)
     events_wait = events_sub.add_parser("wait", help="Wait for the next unread event")
     events_wait.add_argument("--session", help="Filter by session")
+    events_wait.add_argument("--kind", help="Filter by event kind")
+    events_wait.add_argument("--topic", help="Filter by board/event topic")
     events_wait.add_argument("--timeout", type=float, default=1800)
     events_wait.add_argument("--interval", type=float, default=1.0)
     events_wait.add_argument("--consumer", help="Consumer name for unread filtering")

@@ -6,8 +6,8 @@ Use native hooks when a manager agent needs reliable wakeups from a terminal-age
 
 ```bash
 agent-tmux launch --session reviewer --agent claude --events --require-events --run "claude --name reviewer" --log
-agent-tmux prompt reviewer --agent claude "<task>"
-agent-tmux events wait --session reviewer --timeout 1800
+agent-tmux prompt reviewer --agent claude "<task; post a board memo when done>"
+agent-tmux events wait --session reviewer --kind board_post --ack --json --timeout 1800
 ```
 
 `--require-events` fails launch unless `agent-tmux` can verify session-local hook wiring.
@@ -16,8 +16,8 @@ agent-tmux events wait --session reviewer --timeout 1800
 
 ```bash
 agent-tmux launch --session reviewer --agent codex --events --require-events --run "codex" --log
-agent-tmux prompt reviewer --agent codex "<task>"
-agent-tmux events wait --session reviewer --timeout 1800
+agent-tmux prompt reviewer --agent codex "<task; post a board memo when done>"
+agent-tmux events wait --session reviewer --kind board_post --ack --json --timeout 1800
 ```
 
 Codex CLI hook config is passed through a short session-local wrapper. `agent-tmux` does not edit `~/.codex/hooks.json` or project config.

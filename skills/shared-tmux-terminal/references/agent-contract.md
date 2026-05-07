@@ -37,19 +37,19 @@ agent-tmux launch --session <name> --agent claude --events --require-events --pu
 agent-tmux launch --session <name> --agent codex --events --require-events --purpose <purpose> --run "codex" --log
 
 Send work:
-agent-tmux prompt <session> --agent claude "<instruction>"
-agent-tmux prompt <session> --agent codex "<instruction>"
+agent-tmux prompt <session> --agent claude "<instruction; post a board memo when done>"
+agent-tmux prompt <session> --agent codex "<instruction; post a board memo when done>"
 
-Wait for the next wakeup:
-agent-tmux events wait --session <session> --timeout 1800
+Wait for the next memo event:
+agent-tmux events wait --session <session> --kind board_post --ack --json --timeout 1800
 
-Read the referenced board memo if the event points to one:
+Read the referenced board memo:
 agent-tmux board read <message-id>
 
 Use transcript reads only for recovery or evidence checks.
 ```
 
-Events are wakeups. Board posts are durable memos. Neither is task truth.
+Events are wakeups. Board posts are durable memos and auto-associate with the current session when posted inside a managed tmux pane. Neither is task truth.
 
 For recovery tools, read `references/recovery.md`. For profile behavior, read `references/agent-profiles.md`.
 

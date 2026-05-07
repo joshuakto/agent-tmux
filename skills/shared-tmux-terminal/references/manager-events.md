@@ -7,7 +7,7 @@ Use this when one agent supervises terminal agents running inside `agent-tmux`.
 ```bash
 agent-tmux launch --session reviewer --agent claude --events --require-events --purpose review --run "claude --name reviewer" --log
 agent-tmux prompt reviewer --agent claude "Run the task and post a concise memo."
-agent-tmux events wait --session reviewer --timeout 1800
+agent-tmux events wait --session reviewer --kind board_post --ack --json --timeout 1800
 agent-tmux board read <message-id>
 ```
 
@@ -19,12 +19,13 @@ Events are small wakeups for the manager agent. They are not task truth.
 
 ```bash
 agent-tmux events emit --kind needs_input --session reviewer --summary "Need a decision"
-agent-tmux events list --unread
-agent-tmux events wait --session reviewer --timeout 1800 --ack
+agent-tmux events list --unread --kind board_post
+agent-tmux events wait --session reviewer --kind board_post --timeout 1800 --ack
 agent-tmux events ack <event-id>
 ```
 
 Use `--json` on `events wait` or `events list` when a manager agent needs machine-readable output.
+Use `--topic <topic>` when a manager is coordinating several workers on the same board thread.
 
 ## Event Meaning
 
