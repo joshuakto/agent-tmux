@@ -7,7 +7,7 @@ Use native hooks when a manager agent needs reliable wakeups from a terminal-age
 ```bash
 agent-tmux launch --session reviewer --agent claude --events --require-events --run "claude --name reviewer" --log
 agent-tmux prompt reviewer --agent claude "<task; post a board memo when done>"
-agent-tmux events wait --session reviewer --kind board_post --ack --json --timeout 1800
+agent-tmux events wait --session reviewer --kind board_post,needs_input,permission_request,agent_stop,hook_error --ack --json --timeout 1800
 ```
 
 `--require-events` fails launch unless `agent-tmux` can verify session-local hook wiring.
@@ -17,7 +17,7 @@ agent-tmux events wait --session reviewer --kind board_post --ack --json --timeo
 ```bash
 agent-tmux launch --session reviewer --agent codex --events --require-events --run "codex" --log
 agent-tmux prompt reviewer --agent codex "<task; post a board memo when done>"
-agent-tmux events wait --session reviewer --kind board_post --ack --json --timeout 1800
+agent-tmux events wait --session reviewer --kind board_post,needs_input,permission_request,agent_stop,hook_error --ack --json --timeout 1800
 ```
 
 Codex CLI hook config is passed through a short session-local wrapper. `agent-tmux` does not edit `~/.codex/hooks.json` or project config.
@@ -66,6 +66,8 @@ agent-tmux hooks show-config --agent codex --session reviewer
 `hooks ingest` reads vendor hook JSON from stdin and emits canonical events such as `agent_stop`, `needs_input`, `permission_request`, and `hook_error`.
 
 The adapter is observability-only. It never approves, denies, or changes a permission decision.
+
+Native lifecycle events can be multiple per turn. Keep raw events intact and branch on the event kind; do not treat them as task truth.
 
 ## Recovery
 

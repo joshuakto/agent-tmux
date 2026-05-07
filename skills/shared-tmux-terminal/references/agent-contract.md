@@ -40,10 +40,10 @@ Send work:
 agent-tmux prompt <session> --agent claude "<instruction; post a board memo when done>"
 agent-tmux prompt <session> --agent codex "<instruction; post a board memo when done>"
 
-Wait for the next memo event:
-agent-tmux events wait --session <session> --kind board_post --ack --json --timeout 1800
+Wait for the next attention event:
+agent-tmux events wait --session <session> --kind board_post,needs_input,permission_request,agent_stop,hook_error --ack --json --timeout 1800
 
-Read the referenced board memo:
+If the event is board_post, read the referenced board memo:
 agent-tmux board read <message-id>
 
 Use transcript reads only for recovery or evidence checks.

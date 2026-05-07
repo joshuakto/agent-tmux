@@ -73,8 +73,7 @@ When one agent is supervising other terminal agents, prefer event-driven coordin
 ```bash
 agent-tmux launch --session reviewer --agent claude --events --require-events --purpose review --run "claude --name reviewer" --log
 agent-tmux prompt reviewer --agent claude "Run tests and post a concise memo."
-agent-tmux events wait --session reviewer --kind board_post --ack --json --timeout 1800
-agent-tmux board read <message-id>
+agent-tmux events wait --session reviewer --kind board_post,needs_input,permission_request,agent_stop,hook_error --ack --json --timeout 1800
 ```
 
 For Codex CLI:
@@ -82,12 +81,12 @@ For Codex CLI:
 ```bash
 agent-tmux launch --session reviewer --agent codex --events --require-events --purpose review --run "codex" --log
 agent-tmux prompt reviewer --agent codex "Run tests and post a concise memo."
-agent-tmux events wait --session reviewer --kind board_post --ack --json --timeout 1800
+agent-tmux events wait --session reviewer --kind board_post,needs_input,permission_request,agent_stop,hook_error --ack --json --timeout 1800
 ```
 
 `--require-events` makes event wiring reliable: launch fails if native hooks cannot be wired. For Claude Code, `agent-tmux` writes a session-local settings file under `.agent/tmux.d/hooks/<session>/` and injects `--settings <file>` into simple `claude ...` launch commands. For Codex CLI, it writes the equivalent hook config plus a short session-local wrapper under `.agent/tmux.d/hooks/<session>/` and rewrites simple `codex ...` launch commands to use that wrapper. It does not edit global user settings or project settings.
 
-Events are wakeups for the manager agent. Board posts are durable memos. `board post` auto-associates with the current session when run inside a managed tmux pane. Neither is task truth.
+Events are wakeups for the manager agent. Board posts are durable memos. `board post` auto-associates with the current session when run inside a managed tmux pane. Neither is task truth. Branch on the returned event kind: read memos for `board_post`, inspect/ask for `needs_input` or `permission_request`, recover from `agent_stop` without a memo, and diagnose `hook_error`.
 
 ## Advanced Commands
 
@@ -112,8 +111,8 @@ Manager-agent coordination commands:
 
 ```bash
 agent-tmux events emit --kind needs_input --session reviewer --summary "Need approval"
-agent-tmux events list --unread --kind board_post
-agent-tmux events wait --session reviewer --kind board_post --timeout 1800 --ack
+agent-tmux events list --unread --kind board_post,needs_input,permission_request,agent_stop,hook_error
+agent-tmux events wait --session reviewer --kind board_post,needs_input,permission_request,agent_stop,hook_error --timeout 1800 --ack
 agent-tmux events ack <event-id>
 agent-tmux board post --topic review --from reviewer --body-file memo.md
 agent-tmux board list --topic review
@@ -191,7 +190,7 @@ Logs are written under `.agent/tmux.d/logs/` by default. They are raw terminal t
 Events are one-file-per-event JSON records under `.agent/tmux.d/events/events/`, with per-consumer acknowledgements under `.agent/tmux.d/events/acks/`. This avoids append races and lets a supervising agent block on:
 
 ```bash
-agent-tmux events wait --session reviewer --kind board_post --timeout 1800
+agent-tmux events wait --session reviewer --kind board_post,needs_input,permission_request,agent_stop,hook_error --timeout 1800
 ```
 
 Board messages are one immutable Markdown file per post under `.agent/board/threads/<topic>/`. Use the board for concise worker-agent memos when terminal TUI output is hard to read:
@@ -202,7 +201,7 @@ agent-tmux board list --topic exp12-next-steps
 agent-tmux board read <message-id>
 ```
 
-`board post` emits a `board_post` event automatically and infers the session when run inside a managed tmux pane. The manager-agent loop is: wait for a `board_post` event, read the board memo it points to, then decide.
+`board post` emits a `board_post` event automatically and infers the session when run inside a managed tmux pane. For long memos, prefer `--body-file` or stdin. The manager-agent loop is: wait for an attention event, branch by kind, then decide.
 
 ## Native Hook Ingestion
 
@@ -224,6 +223,7 @@ agent-tmux launch --session reviewer --agent codex --events --require-events --r
 ```
 
 If the launch command is not a simple `claude ...` or `codex ...` invocation, `--require-events` fails with a concrete reason. Existing `read`, `wait`, `search`, and `attach` remain recovery tools for inherited sessions, debugging, and evidence checks.
+Native lifecycle events can be multiple per turn; raw events are kept for observability rather than deduped.
 
 ## Human Tmux Profile
 

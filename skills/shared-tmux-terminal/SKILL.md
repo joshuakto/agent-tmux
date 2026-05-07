@@ -40,13 +40,14 @@ When supervising other terminal agents, prefer events and board memos over repea
 ```bash
 .agent/tmux launch --session <name> --agent claude --events --require-events --purpose <purpose> --run "claude --name <name>" --log
 .agent/tmux prompt <session> --agent claude "<instruction; post a board memo when done>"
-.agent/tmux events wait --session <session> --kind board_post --ack --json --timeout 1800
-.agent/tmux board read <message-id>
+.agent/tmux events wait --session <session> --kind board_post,needs_input,permission_request,agent_stop,hook_error --ack --json --timeout 1800
 ```
 
 For Codex CLI, use the same path with `--agent codex --run "codex"`. `--require-events` fails fast unless the session-local hook config is injected.
 
 `board post` auto-associates with the current session when it is run inside a managed tmux pane, so worker agents usually do not need to pass `--session`.
+
+Branch on the returned event: `board_post` -> `board read <message-id>`; `needs_input` or `permission_request` -> inspect or ask the human; `agent_stop` without a memo -> read recent output or prompt for a memo; `hook_error` -> run `hooks status` or `doctor`.
 
 Use `read`, `search`, and `attach` for recovery or evidence checks, not routine manager-agent notification. Events and board messages are coordination aids, not task truth.
 
@@ -59,7 +60,7 @@ Use `read`, `search`, and `attach` for recovery or evidence checks, not routine 
 - Session seems missing or socket access fails: run `doctor`; do not conclude absence from a failed probe.
 - Human wants to inspect/interfere: report the `attach` command.
 - Need proof of completion: inspect artifacts/tests/branches, not logs or marks.
-- Supervising a worker agent: use `--require-events`, wait for `--kind board_post`, then read the referenced board memo.
+- Supervising a worker agent: use `--require-events`, wait for attention events, then branch by event kind.
 
 ## Load References Only When Needed
 

@@ -379,6 +379,13 @@ def load_event_file(path: Path) -> dict[str, Any] | None:
     return data
 
 
+def parse_kind_filter(kind: str | None) -> set[str] | None:
+    if not kind:
+        return None
+    kinds = {part.strip() for part in kind.split(",") if part.strip()}
+    return kinds or None
+
+
 def list_events(
     root: Path,
     *,
@@ -391,12 +398,13 @@ def list_events(
     directory = events_dir(root)
     if not directory.exists():
         return []
+    kinds = parse_kind_filter(kind)
     entries: list[dict[str, Any]] = []
     for path in sorted(directory.glob("*.json")):
         event = load_event_file(path)
         if event is None:
             continue
-        if not event_matches_filters(event, session=session, kind=kind, topic=topic):
+        if not event_matches_filters(event, session=session, kinds=kinds, topic=topic):
             continue
         if unread and event_is_acked(root, event["id"], consumer):
             continue
@@ -408,12 +416,12 @@ def event_matches_filters(
     event: dict[str, Any],
     *,
     session: str | None = None,
-    kind: str | None = None,
+    kinds: set[str] | None = None,
     topic: str | None = None,
 ) -> bool:
     if session and event.get("session") != session:
         return False
-    if kind and event.get("kind") != kind:
+    if kinds and event.get("kind") not in kinds:
         return False
     if topic and event.get("topic") != topic:
         return False
@@ -2219,7 +2227,7 @@ def parser() -> argparse.ArgumentParser:
     events_emit.set_defaults(func=events_cmd)
     events_list = events_sub.add_parser("list", help="List events")
     events_list.add_argument("--session", help="Filter by session")
-    events_list.add_argument("--kind", help="Filter by event kind")
+    events_list.add_argument("--kind", help="Filter by event kind; comma-separated means any matching kind")
     events_list.add_argument("--topic", help="Filter by board/event topic")
     events_list.add_argument("--unread", action="store_true", help="Only show events not acked by this consumer")
     events_list.add_argument("--consumer", help="Consumer name for unread filtering")
@@ -2228,7 +2236,7 @@ def parser() -> argparse.ArgumentParser:
     events_list.set_defaults(func=events_cmd)
     events_wait = events_sub.add_parser("wait", help="Wait for the next unread event")
     events_wait.add_argument("--session", help="Filter by session")
-    events_wait.add_argument("--kind", help="Filter by event kind")
+    events_wait.add_argument("--kind", help="Filter by event kind; comma-separated means any matching kind")
     events_wait.add_argument("--topic", help="Filter by board/event topic")
     events_wait.add_argument("--timeout", type=float, default=1800)
     events_wait.add_argument("--interval", type=float, default=1.0)
