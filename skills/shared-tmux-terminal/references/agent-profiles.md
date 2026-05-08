@@ -20,7 +20,7 @@ Use `prompt` when you want to send a user message to a terminal agent:
 agent-tmux prompt reviewer --agent claude "Summarize current status."
 ```
 
-`prompt` creates a transcript mark before sending by default. The mark is an out-of-band log offset, not text typed into the terminal. Use it to inspect only the response that followed the prompt:
+`prompt` creates a transcript mark before sending by default. The mark is an out-of-band log offset and event cursor, not text typed into the terminal. In the manager-agent loop, use it with `events wait --since-mark`. Use transcript reads only when you need raw terminal evidence:
 
 ```bash
 agent-tmux read reviewer --since-mark <mark-id> --lines 120

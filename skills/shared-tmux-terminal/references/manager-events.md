@@ -6,24 +6,25 @@ Use this when one agent supervises terminal agents running inside `agent-tmux`.
 
 ```bash
 agent-tmux launch --session reviewer --agent claude --events --require-events --purpose review --run "claude --name reviewer" --log
-agent-tmux prompt reviewer --agent claude "Run the task and post a concise memo."
-agent-tmux events wait --session reviewer --kind board_post,needs_input,permission_request,agent_stop,hook_error --ack --json --timeout 1800
+agent-tmux prompt reviewer --agent claude "Run the task. When finished or blocked, run: agent-tmux board post --topic review \"concise status memo\""
+agent-tmux events wait --session reviewer --kind board_post,needs_input,permission_request,agent_stop,hook_error --since-mark <mark-id> --ack --json --timeout 1800
 ```
 
 Use `--agent codex --run "codex"` for Codex CLI sessions.
 
-Events are small wakeups for the manager agent. They are not task truth.
+Events are small wakeups for the manager agent. Use the mark printed by `prompt` as the event cursor so stale unread events from earlier turns are ignored. Events are not task truth.
 
 ## Commands
 
 ```bash
 agent-tmux events emit --kind needs_input --session reviewer --summary "Need a decision"
 agent-tmux events list --unread --kind board_post,needs_input,permission_request,agent_stop,hook_error
-agent-tmux events wait --session reviewer --kind board_post,needs_input,permission_request,agent_stop,hook_error --timeout 1800 --ack
+agent-tmux events wait --session reviewer --kind board_post,needs_input,permission_request,agent_stop,hook_error --since-mark <mark-id> --timeout 1800 --ack
 agent-tmux events ack <event-id>
 ```
 
 Use `--json` on `events wait` or `events list` when a manager agent needs machine-readable output.
+Use `--since-mark <mark-id>` after `prompt`; use `--from-now` only when no prompt mark exists.
 Use `--topic <topic>` for board-specific waits. Do not combine `--topic` with the multi-kind attention wait unless you intentionally want to ignore native events that have no topic.
 Use comma-separated `--kind` values when waiting for any attention event.
 

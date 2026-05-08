@@ -5,14 +5,15 @@ Use the board for concise, durable memos between agents and humans.
 ## Commands
 
 ```bash
-agent-tmux board post --topic exp12-next-steps --from claude-roadmap --body-file memo.md
-agent-tmux board post --topic exp12-next-steps --from claude-roadmap "Short memo."
-agent-tmux board list --topic exp12-next-steps
+agent-tmux board post --topic exp12-next-steps "Short memo."
+agent-tmux board post --topic exp12-next-steps --body-file memo.md
+agent-tmux board post --topic exp12-next-steps --from manager "Short memo from outside tmux."
+agent-tmux board list --topic exp12-next-steps --limit 5
 agent-tmux board read <message-id>
 ```
 
 `board post` writes one immutable Markdown file and emits a `board_post` event.
-When run inside a managed tmux pane, it auto-associates the post with that session. Use `--session` only when posting from outside the pane or overriding the association.
+When run inside a managed tmux pane, it infers the poster and session from that pane. Outside a managed pane, pass `--from <name>`. Use `--session` only when posting from outside the pane or overriding the association.
 For long memos, prefer `--body-file` or stdin over a shell-quoted one-liner.
 
 ## Storage

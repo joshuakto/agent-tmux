@@ -14,6 +14,7 @@ agent-tmux doctor --question "<what looked wrong>" --context "<what you were doi
 - Run from the project root or pass `--cwd`.
 - If a human can see a session but `list` cannot, use `doctor` before concluding it is gone.
 - If active pane may have changed, use `status` or pass an explicit `--pane <session>:<window>.<pane>`.
+- `list`, `report`, and `status` flag sessions in the registry that no longer exist in tmux as `Dead but registered` (typically killed externally). `status <session>` distinguishes this from a never-existed session and prints the registry entry plus a recovery hint.
 
 ## Stale History Or Viewport Confusion
 
@@ -45,6 +46,7 @@ agent-tmux interrupt <session>
 ```
 
 Interrupt only the target session/pane. If unsure which pane is active, run `status` first.
+If an interactive agent remains wedged after one interrupt, especially during a vendor tool call, preserve the pane for inspection and launch a fresh session with a shorter corrected prompt. Do not keep layering prompts into a stuck TUI.
 
 ## Terminal-Agent UI Edge Cases
 

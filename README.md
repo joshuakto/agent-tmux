@@ -47,14 +47,11 @@ The wrapper is intentionally small. It forwards to `agent-tmux` and does not sto
 ## Golden Path
 
 ```bash
-agent-tmux launch --session reviewer --purpose review --run "claude --name reviewer" --log
+agent-tmux launch --session reviewer --agent claude --events --require-events --purpose review --run "claude --name reviewer" --log
 agent-tmux report
-agent-tmux prompt reviewer --agent claude "Run tests and report failures."
-agent-tmux read reviewer --since-mark <mark-id> --lines 120
-agent-tmux wait reviewer "tests passed|failed" --since-mark <mark-id> --timeout 300
-agent-tmux search reviewer "error|failed" --ignore-case --context 3
-agent-tmux doctor --question "why did the session disappear?" --context "human can still see it"
-agent-tmux attach reviewer
+agent-tmux prompt reviewer --agent claude "Run tests. When finished or blocked, run: agent-tmux board post --topic review \"concise status memo\""
+agent-tmux events wait --session reviewer --kind board_post,needs_input,permission_request,agent_stop,hook_error --since-mark <mark-id> --ack --json --timeout 1800
+agent-tmux board read <message-id>
 ```
 
 With the project wrapper:
@@ -64,29 +61,59 @@ With the project wrapper:
 .agent/tmux attach reviewer
 ```
 
-Use the golden path for routine agent supervision. Logs and marks are navigation aids; artifacts, tests, commits, process exit status, and explicit reports are task truth.
+Use the golden path for routine terminal-agent supervision. `prompt` prints a mark; use that mark with `events wait --since-mark` so stale unread events from earlier turns do not wake the manager. Events are wakeups and board posts are concise memos. Artifacts, tests, commits, process exit status, and explicit reports remain task truth.
 
-## Manager-Agent Path
+## Basic Shared Terminal Path
 
-When one agent is supervising other terminal agents, prefer event-driven coordination over repeated pane polling:
+Use this for shells, REPLs, dev servers, and inherited sessions that do not need native agent events:
+
+```bash
+agent-tmux launch --session shell --purpose repl --run "bash" --log
+agent-tmux prompt shell --agent generic "pwd"
+agent-tmux read shell --since-mark <mark-id> --lines 120
+agent-tmux wait shell "ready|failed" --since-mark <mark-id> --timeout 300
+agent-tmux attach shell
+```
+
+## Manager-Agent Details
+
+When one agent supervises other terminal agents, use event-driven coordination over repeated pane polling:
 
 ```bash
 agent-tmux launch --session reviewer --agent claude --events --require-events --purpose review --run "claude --name reviewer" --log
-agent-tmux prompt reviewer --agent claude "Run tests and post a concise memo."
-agent-tmux events wait --session reviewer --kind board_post,needs_input,permission_request,agent_stop,hook_error --ack --json --timeout 1800
+agent-tmux prompt reviewer --agent claude "Run tests. When finished or blocked, run: agent-tmux board post --topic review \"concise status memo\""
+agent-tmux events wait --session reviewer --kind board_post,needs_input,permission_request,agent_stop,hook_error --since-mark <mark-id> --ack --json --timeout 1800
 ```
 
 For Codex CLI:
 
 ```bash
 agent-tmux launch --session reviewer --agent codex --events --require-events --purpose review --run "codex" --log
-agent-tmux prompt reviewer --agent codex "Run tests and post a concise memo."
-agent-tmux events wait --session reviewer --kind board_post,needs_input,permission_request,agent_stop,hook_error --ack --json --timeout 1800
+agent-tmux prompt reviewer --agent codex "Run tests. When finished or blocked, run: agent-tmux board post --topic review \"concise status memo\""
+agent-tmux events wait --session reviewer --kind board_post,needs_input,permission_request,agent_stop,hook_error --since-mark <mark-id> --ack --json --timeout 1800
 ```
 
-`--require-events` makes event wiring reliable: launch fails if native hooks cannot be wired. For Claude Code, `agent-tmux` writes a session-local settings file under `.agent/tmux.d/hooks/<session>/` and injects `--settings <file>` into simple `claude ...` launch commands. For Codex CLI, it writes the equivalent hook config plus a short session-local wrapper under `.agent/tmux.d/hooks/<session>/` and rewrites simple `codex ...` launch commands to use that wrapper. It does not edit global user settings or project settings.
+`--require-events` makes event wiring reliable: launch fails if native hooks cannot be wired or if the run-command binary is not resolvable on `PATH` or as an absolute executable. For Claude Code, `agent-tmux` writes a session-local settings file under `.agent/tmux.d/hooks/<session>/` and injects `--settings <file>` into simple `claude ...` launch commands. For Codex CLI, it writes the equivalent hook config plus a short session-local wrapper under `.agent/tmux.d/hooks/<session>/` and rewrites simple `codex ...` launch commands to use that wrapper. It does not edit global user settings or project settings. Relative paths with separators (e.g. `./bin/claude`) are rejected — pass an absolute path or a `PATH`-resolvable name.
 
 Events are wakeups for the manager agent. Board posts are durable memos. `board post` auto-associates with the current session when run inside a managed tmux pane. Neither is task truth. Branch on the returned event kind: read memos for `board_post`, inspect/ask for `needs_input` or `permission_request`, recover from `agent_stop` without a memo, and diagnose `hook_error`.
+
+## Field Lessons
+
+Recent multi-agent Colab runs exposed the practical edges this tool should
+optimize for:
+
+- Use `prompt` marks as the event cursor. `events wait --since-mark <mark-id>`
+  prevents stale unread hook events from waking the manager after a new prompt.
+- Treat native events as wakeups, not conclusions. Verify task truth from
+  artifacts, commits, process status, and explicit board memos.
+- Keep persistence policy outside `agent-tmux`. The project should say where
+  durable artifacts live; for Colab experiments, GitHub branches were more
+  reliable than Drive because Drive auth can require interactive credentials.
+- If a TUI agent remains wedged after one interrupt, preserve the pane for
+  inspection and start a fresh session with a shorter corrected prompt. Do not
+  keep layering prompts into a stuck tool-call state.
+- Use `report` for cleanup review. Detached sessions are candidates to inspect
+  or kill, but attached sessions may be under active human control.
 
 ## Advanced Commands
 
@@ -112,10 +139,11 @@ Manager-agent coordination commands:
 ```bash
 agent-tmux events emit --kind needs_input --session reviewer --summary "Need approval"
 agent-tmux events list --unread --kind board_post,needs_input,permission_request,agent_stop,hook_error
-agent-tmux events wait --session reviewer --kind board_post,needs_input,permission_request,agent_stop,hook_error --timeout 1800 --ack
+agent-tmux events wait --session reviewer --kind board_post,needs_input,permission_request,agent_stop,hook_error --since-mark m_... --timeout 1800 --ack
 agent-tmux events ack <event-id>
-agent-tmux board post --topic review --from reviewer --body-file memo.md
-agent-tmux board list --topic review
+agent-tmux board post --topic review "concise status memo"
+agent-tmux board post --topic review --from manager --body-file memo.md
+agent-tmux board list --topic review --limit 5
 agent-tmux board read <message-id>
 agent-tmux hooks status reviewer
 agent-tmux hooks show-config --agent claude --session reviewer
@@ -140,7 +168,7 @@ For `read`, `search`, `wait`, and `dump`, `--lines N` means the last N captured 
 
 ## Reading Only New Output
 
-When supervising terminal agents, prefer transcript marks over asking the target agent for status. Marks are out-of-band byte offsets in the transcript log; they are not typed into the pane and cannot collide with real terminal output.
+When supervising terminal agents, prefer transcript marks over asking the target agent for status. Marks are out-of-band byte offsets in the transcript log and event cursors for the manager loop; they are not typed into the pane and cannot collide with real terminal output.
 
 `prompt` creates a pre-send mark by default:
 
@@ -149,6 +177,7 @@ agent-tmux prompt reviewer --agent claude "Run tests and report failures."
 # prompt sent: target=reviewer:0.0 profile=claude submitted=yes mark=m_...
 agent-tmux read reviewer --since-mark m_... --lines 120
 agent-tmux wait reviewer "tests passed|failed" --since-mark m_... --timeout 300
+agent-tmux events wait --session reviewer --kind board_post,needs_input,permission_request,agent_stop,hook_error --since-mark m_... --ack --json
 ```
 
 Create marks manually or wait only on output appended after invocation:
@@ -158,7 +187,7 @@ agent-tmux mark reviewer --label before-test
 agent-tmux wait reviewer "complete|failed" --from-now --timeout 300
 ```
 
-Marks require transcript logging. `prompt`, `mark`, and `wait --from-now` will start `agent-tmux` transcript logging for the target pane if needed.
+Marks require transcript logging. `prompt`, `mark`, and `wait --from-now` will start `agent-tmux` transcript logging for the target pane if needed. `events --since-mark` reuses the mark's timestamp to ignore stale unread events from earlier turns.
 
 ## Diagnostics And Logs
 
@@ -190,18 +219,21 @@ Logs are written under `.agent/tmux.d/logs/` by default. They are raw terminal t
 Events are one-file-per-event JSON records under `.agent/tmux.d/events/events/`, with per-consumer acknowledgements under `.agent/tmux.d/events/acks/`. This avoids append races and lets a supervising agent block on:
 
 ```bash
-agent-tmux events wait --session reviewer --kind board_post,needs_input,permission_request,agent_stop,hook_error --timeout 1800
+agent-tmux events wait --session reviewer --kind board_post,needs_input,permission_request,agent_stop,hook_error --since-mark m_... --timeout 1800
 ```
 
 Board messages are one immutable Markdown file per post under `.agent/board/threads/<topic>/`. Use the board for concise worker-agent memos when terminal TUI output is hard to read:
 
 ```bash
-agent-tmux board post --topic exp12-next-steps --from reviewer --body-file memo.md
-agent-tmux board list --topic exp12-next-steps
+agent-tmux board post --topic exp12-next-steps "Short memo."
+agent-tmux board post --topic exp12-next-steps --body-file memo.md
+agent-tmux board list --topic exp12-next-steps --limit 5
 agent-tmux board read <message-id>
 ```
 
-`board post` emits a `board_post` event automatically and infers the session when run inside a managed tmux pane. For long memos, prefer `--body-file` or stdin. The manager-agent loop is: wait for an attention event, branch by kind, then decide.
+`board post` emits a `board_post` event automatically and infers the poster/session when run inside a managed tmux pane. Outside a managed pane, pass `--from <name>`. For long memos, prefer `--body-file` or stdin. The manager-agent loop is: wait for an attention event, branch by kind, then decide.
+
+Acks are per-consumer. By default `events wait --session X --ack`, `events list --session X --unread`, and `events ack <id>` (which infers the session from the event file) all derive consumer = `X`. Per-session waits get per-session consumers automatically; pass `--consumer` (or set `AGENT_TMUX_CONSUMER`) for global waits or to override. Consumer names must match `^[a-z0-9][a-z0-9_-]*$`; mismatches fail loudly. Without a session and without an explicit consumer, `events wait` falls back to `manager` and prints a one-time warning to stderr (stdout stays clean for `--json` parsers).
 
 ## Native Hook Ingestion
 
@@ -269,11 +301,11 @@ Run it from the project root, or pass --cwd /path/to/project.
 
 Golden path:
 
-agent-tmux launch --session <name> --purpose <purpose> --run "<command>" --log
+agent-tmux launch --session <name> --agent claude --events --require-events --purpose <purpose> --run "claude --name <name>" --log
 agent-tmux report
-agent-tmux prompt <session> --agent claude "<instruction>"
-agent-tmux read <session> --since-mark <mark-id> --lines 120
-agent-tmux wait <session> "<pattern>" --since-mark <mark-id> --timeout 300
+agent-tmux prompt <session> --agent claude "<instruction; when finished or blocked, run: agent-tmux board post --topic <topic> \"concise status memo\">"
+agent-tmux events wait --session <session> --kind board_post,needs_input,permission_request,agent_stop,hook_error --since-mark <mark-id> --ack --json --timeout 1800
+agent-tmux board read <message-id>
 
 If a session seems missing or socket access fails, diagnose with:
 agent-tmux doctor --question "<what looked wrong>" --context "<what you were doing>"
@@ -281,7 +313,8 @@ agent-tmux doctor --question "<what looked wrong>" --context "<what you were doi
 If a human wants to inspect:
 agent-tmux attach <session>
 
-Do not treat logs, marks, or wait output as task truth.
+Use read/search/wait only for recovery or evidence checks.
+Do not treat logs, marks, events, or wait output as task truth.
 Task truth comes from artifacts, tests, commits, process exit status, and explicit reports.
 ```
 

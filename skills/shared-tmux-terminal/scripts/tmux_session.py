@@ -111,7 +111,7 @@ TMUX_PROFILE_COMMANDS: list[list[str]] = [
 
 
 def now_iso() -> str:
-    return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+    return datetime.now(timezone.utc).isoformat()
 
 
 def slugify(text: str) -> str:
@@ -275,7 +275,8 @@ def run_tmux(
     input_text: str | None = None,
 ) -> subprocess.CompletedProcess[str]:
     cmd = ["tmux", "-S", str(socket), *args]
-    result = subprocess.run(cmd, text=True, input=input_text, capture_output=capture or check, check=False)
+    env = {key: value for key, value in os.environ.items() if key != "TMUX"}
+    result = subprocess.run(cmd, text=True, input=input_text, capture_output=capture or check, check=False, env=env)
     if check and result.returncode != 0:
         raise TmuxError(cmd, result.returncode, result.stdout or "", result.stderr or "")
     return result
@@ -290,8 +291,9 @@ def tmux_output(socket: Path, args: list[str]) -> str:
 
 def try_tmux(socket: Path, args: list[str]) -> dict[str, Any]:
     cmd = ["tmux", "-S", str(socket), *args]
+    env = {key: value for key, value in os.environ.items() if key != "TMUX"}
     try:
-        result = subprocess.run(cmd, text=True, capture_output=True, check=False)
+        result = subprocess.run(cmd, text=True, capture_output=True, check=False, env=env)
     except OSError as exc:
         return {
             "cmd": cmd,
@@ -394,6 +396,7 @@ def list_events(
     topic: str | None = None,
     unread: bool = False,
     consumer: str | None = None,
+    since_created_at: str | None = None,
 ) -> list[dict[str, Any]]:
     directory = events_dir(root)
     if not directory.exists():
@@ -406,10 +409,25 @@ def list_events(
             continue
         if not event_matches_filters(event, session=session, kinds=kinds, topic=topic):
             continue
+        if since_created_at and str(event.get("created_at", "")) <= since_created_at:
+            continue
         if unread and event_is_acked(root, event["id"], consumer):
             continue
         entries.append(event)
     return sorted(entries, key=lambda event: (str(event.get("created_at", "")), str(event.get("id", ""))))
+
+
+def event_cursor_from_args(root: Path, args: argparse.Namespace) -> str | None:
+    since_mark = getattr(args, "since_mark", None)
+    from_now = getattr(args, "from_now", False)
+    if since_mark and from_now:
+        raise SystemExit("--since-mark and --from-now are mutually exclusive")
+    if since_mark:
+        mark = resolve_mark(root, since_mark)
+        return str(mark.get("created_at") or "")
+    if from_now:
+        return now_iso()
+    return None
 
 
 def event_matches_filters(
@@ -428,21 +446,51 @@ def event_matches_filters(
     return True
 
 
-def default_consumer() -> str:
-    return slugify(os.environ.get("AGENT_TMUX_CONSUMER") or "manager")
+CONSUMER_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9_-]*$")
+_default_consumer_warned = False
 
 
-def ack_path(root: Path, event_id: str, consumer: str | None = None) -> Path:
-    return events_ack_dir(root) / slugify(consumer or default_consumer()) / f"{slugify(event_id)}.ack"
+def validate_consumer_name(name: str, *, source: str) -> str:
+    if not CONSUMER_NAME_RE.match(name):
+        raise SystemExit(
+            f"invalid consumer name {name!r} from {source}: must match {CONSUMER_NAME_RE.pattern}. "
+            "Pass --consumer with a slug-safe name to override."
+        )
+    return name
 
 
-def event_is_acked(root: Path, event_id: str, consumer: str | None = None) -> bool:
+def _warn_default_consumer_once() -> None:
+    global _default_consumer_warned
+    if _default_consumer_warned:
+        return
+    _default_consumer_warned = True
+    print(
+        "events: defaulting to consumer=manager; pass --consumer or AGENT_TMUX_CONSUMER to avoid sharing acks",
+        file=sys.stderr,
+    )
+
+
+def default_consumer(session: str | None = None) -> str:
+    env = os.environ.get("AGENT_TMUX_CONSUMER")
+    if env:
+        return validate_consumer_name(env, source="AGENT_TMUX_CONSUMER")
+    if session:
+        return validate_consumer_name(session, source="session")
+    _warn_default_consumer_once()
+    return "manager"
+
+
+def ack_path(root: Path, event_id: str, consumer: str) -> Path:
+    return events_ack_dir(root) / slugify(consumer) / f"{slugify(event_id)}.ack"
+
+
+def event_is_acked(root: Path, event_id: str, consumer: str) -> bool:
     return ack_path(root, event_id, consumer).exists()
 
 
-def ack_event(root: Path, event_id: str, consumer: str | None = None) -> Path:
+def ack_event(root: Path, event_id: str, consumer: str) -> Path:
     path = ack_path(root, event_id, consumer)
-    atomic_write_text(path, json.dumps({"event_id": event_id, "consumer": consumer or default_consumer(), "acked_at": now_iso()}, sort_keys=True) + "\n")
+    atomic_write_text(path, json.dumps({"event_id": event_id, "consumer": consumer, "acked_at": now_iso()}, sort_keys=True) + "\n")
     return path
 
 
@@ -560,15 +608,43 @@ def write_hook_settings(root: Path, agent: str, session: str) -> tuple[Path | No
     return None, "unsupported-agent", f"native hook wiring is not implemented for agent profile: {profile_name}", {}
 
 
-def wire_claude_run_command(run: str | None, settings_path: Path | None) -> tuple[str | None, bool, str | None]:
-    if not run or settings_path is None:
-        return run, False, "no run command to wire" if not run else "no settings path"
+def _binary_resolvable(token: str) -> tuple[bool, str | None]:
+    path = Path(token)
+    if path.is_absolute():
+        if path.is_file() and os.access(token, os.X_OK):
+            return True, None
+        return False, f"binary not found or not executable: {token}"
+    if "/" in token or os.sep in token:
+        return False, (
+            f"relative paths are not supported for hook wiring; "
+            f"pass an absolute path or a PATH-resolvable name (got {token!r})"
+        )
+    if shutil.which(token):
+        return True, None
+    return False, f"binary not found on PATH: {token}"
+
+
+def parse_run_for_wiring(run: str | None, expected_basename: str) -> tuple[list[str] | None, str | None]:
+    if not run:
+        return None, "no run command to wire"
     try:
         tokens = shlex.split(run)
     except ValueError as exc:
-        return run, False, f"could not parse --run for hook wiring: {exc}"
-    if not tokens or Path(tokens[0]).name != "claude":
-        return run, False, "run command is not a simple claude invocation"
+        return None, f"could not parse --run for hook wiring: {exc}"
+    if not tokens or Path(tokens[0]).name != expected_basename:
+        return None, f"run command is not a simple {expected_basename} invocation"
+    ok, reason = _binary_resolvable(tokens[0])
+    if not ok:
+        return None, f"{expected_basename} {reason}"
+    return tokens, None
+
+
+def wire_claude_run_command(run: str | None, settings_path: Path | None) -> tuple[str | None, bool, str | None]:
+    if settings_path is None:
+        return run, False, "no settings path"
+    tokens, error = parse_run_for_wiring(run, "claude")
+    if tokens is None:
+        return run, False, error
     if any(token == "--settings" or token.startswith("--settings=") for token in tokens):
         return run, False, "run command already contains --settings"
     tokens[1:1] = ["--settings", str(settings_path)]
@@ -606,14 +682,11 @@ def write_codex_wrapper(root: Path, session: str, codex_program: str, config_pat
 
 
 def wire_codex_run_command(root: Path, session: str, run: str | None, config_path: Path | None) -> tuple[str | None, bool, str | None]:
-    if not run or not config_path:
-        return run, False, "no run command to wire" if not run else "no Codex hooks config"
-    try:
-        tokens = shlex.split(run)
-    except ValueError as exc:
-        return run, False, f"could not parse --run for hook wiring: {exc}"
-    if not tokens or Path(tokens[0]).name != "codex":
-        return run, False, "run command is not a simple codex invocation"
+    if not config_path:
+        return run, False, "no Codex hooks config"
+    tokens, error = parse_run_for_wiring(run, "codex")
+    if tokens is None:
+        return run, False, error
     if run_has_codex_hooks_override(tokens):
         return run, False, "run command already configures hooks"
     wrapper_path = write_codex_wrapper(root, session, tokens[0], config_path)
@@ -653,6 +726,28 @@ def list_sessions(socket: Path) -> list[dict[str, Any]]:
             }
         )
     return sessions
+
+
+def compute_session_view(socket: Path, registry: dict[str, Any]) -> dict[str, Any]:
+    registered = sorted((registry.get("sessions") or {}).keys())
+    live_sessions: list[dict[str, Any]] = []
+    error: str | None = None
+    if socket.exists():
+        try:
+            live_sessions = list_sessions(socket)
+        except TmuxError as exc:
+            error = str(exc)
+    live = sorted(s["name"] for s in live_sessions)
+    reg_set = set(registered)
+    live_set = set(live)
+    return {
+        "registered": registered,
+        "live": live,
+        "live_sessions": live_sessions,
+        "dead_but_registered": sorted(reg_set - live_set),
+        "unregistered_live": sorted(live_set - reg_set),
+        "tmux_error": error,
+    }
 
 
 def list_panes(socket: Path, session: str) -> list[dict[str, Any]]:
@@ -1000,14 +1095,26 @@ def update_log_registry(registry: dict[str, Any], session: str, target: str, dat
 
 
 def print_report(root: Path, socket: Path, registry: dict[str, Any], *, lines: int = 60) -> None:
-    sessions = list_sessions(socket)
+    view = compute_session_view(socket, registry)
+    sessions = view["live_sessions"]
     registry_sessions = registry.get("sessions", {})
 
     print(f"Project root: {root}")
     print(f"Socket: {socket}")
+    if view["tmux_error"]:
+        print(f"tmux probe failed: {view['tmux_error']}")
     print(f"Live sessions: {len(sessions)}")
+    detached = [sess["name"] for sess in sessions if not sess["attached"]]
+    attached = [sess["name"] for sess in sessions if sess["attached"]]
+    if detached:
+        print(f"Detached sessions to review: {', '.join(detached)}")
+    if attached:
+        print(f"Attached sessions: {', '.join(attached)}")
+    if view["dead_but_registered"]:
+        print(f"Dead but registered: {', '.join(view['dead_but_registered'])}")
     if not sessions:
-        print("No live tmux sessions found on this socket.")
+        if not view["dead_but_registered"]:
+            print("No live tmux sessions found on this socket.")
         return
 
     for sess in sessions:
@@ -1040,6 +1147,9 @@ def print_report(root: Path, socket: Path, registry: dict[str, Any], *, lines: i
             if sample.strip():
                 for line in sample.splitlines():
                     print(f"      {line}")
+    if detached:
+        print()
+        print("Review detached sessions before cleanup; use kill only after confirming no process or artifact matters.")
 
 
 def update_registry_entry(
@@ -1232,24 +1342,25 @@ def list_cmd(args: argparse.Namespace) -> int:
     socket = socket_path(root, args.socket)
     registry_file = registry_path(root)
     registry = load_registry(registry_file)
+    view = compute_session_view(socket, registry)
     if not socket.exists():
-        registry_sessions = sorted((registry.get("sessions") or {}).keys())
-        if registry_sessions:
+        if view["registered"]:
             print(f"Project tmux socket is missing but registry has sessions at {registry_file}:")
-            for name in registry_sessions:
+            for name in view["registered"]:
                 print(f"- {name}")
             print(f"Run {user_command(root, 'doctor')} to diagnose stale registry/socket state.")
             return 1
         print(f"No project tmux socket found at {socket}")
         print(f"Start one with {user_command(root, 'launch --purpose <purpose>')}")
         return 0
-    sessions = list_sessions(socket)
-    if not sessions:
+    if view["tmux_error"]:
+        print(f"tmux probe failed: {view['tmux_error']}")
+    if not view["live_sessions"] and not view["dead_but_registered"]:
         print(f"No live tmux sessions found at {socket}")
         return 0
 
     print(f"Socket: {socket}")
-    for sess in sessions:
+    for sess in view["live_sessions"]:
         name = sess["name"]
         panes = list_panes(socket, name)
         reg = registry.get("sessions", {}).get(name, {})
@@ -1258,6 +1369,8 @@ def list_cmd(args: argparse.Namespace) -> int:
             f"- {name}  windows={sess['windows']}  panes={len(panes)}  "
             f"attached={'yes' if sess['attached'] else 'no'}  purpose={purpose}"
         )
+    if view["dead_but_registered"]:
+        print(f"Dead but registered: {', '.join(view['dead_but_registered'])}")
     return 0
 
 
@@ -1280,17 +1393,24 @@ def status_cmd(args: argparse.Namespace) -> int:
     socket = socket_path(root, args.socket)
     registry = load_registry(registry_path(root))
     session = args.session
-    probe = try_tmux(socket, ["has-session", "-t", session])
-    if not probe["ok"]:
-        message = (probe["stdout"] + probe["stderr"]).strip()
-        if classify_tmux_failure(socket, message) == "session-not-found":
-            print(f"Session not found: {session}")
+    view = compute_session_view(socket, registry)
+    if session not in view["live"]:
+        if session in view["dead_but_registered"]:
+            reg = registry.get("sessions", {}).get(session, {})
+            print(f"Session not live (registered, killed externally): {session}")
+            if reg.get("purpose"):
+                print(f"  purpose: {reg['purpose']}")
+            if reg.get("cwd"):
+                print(f"  cwd: {reg['cwd']}")
+            if reg.get("run"):
+                print(f"  run: {reg['run']}")
+            print(f"  recover with {user_command(root, 'doctor')} or {user_command(root, f'launch --session {session} ...')}")
             return 1
-        raise TmuxError(probe["cmd"], probe["returncode"], probe["stdout"], probe["stderr"])
-    if not session_exists(socket, session):
+        if view["tmux_error"]:
+            print(f"tmux probe failed: {view['tmux_error']}")
         print(f"Session not found: {session}")
         return 1
-    sess = next((s for s in list_sessions(socket) if s["name"] == session), None)
+    sess = next((s for s in view["live_sessions"] if s["name"] == session), None)
     panes = list_panes(socket, session)
     reg = registry.get("sessions", {}).get(session, {})
     print(f"Session: {session}")
@@ -1577,10 +1697,16 @@ def profiles_cmd(args: argparse.Namespace) -> int:
     return 0
 
 
+def _resolve_consumer(args: argparse.Namespace, *, session: str | None) -> str:
+    explicit = getattr(args, "consumer", None)
+    if explicit:
+        return validate_consumer_name(explicit, source="--consumer")
+    return default_consumer(session)
+
+
 def events_cmd(args: argparse.Namespace) -> int:
     root = project_root(Path(args.cwd) if args.cwd else None)
     socket = socket_path(root, getattr(args, "socket", None))
-    consumer = getattr(args, "consumer", None) or default_consumer()
 
     if args.events_action == "emit":
         event: dict[str, Any] = {}
@@ -1617,6 +1743,8 @@ def events_cmd(args: argparse.Namespace) -> int:
         return 0
 
     if args.events_action == "list":
+        since_created_at = event_cursor_from_args(root, args)
+        consumer = _resolve_consumer(args, session=args.session) if args.unread else None
         events = list_events(
             root,
             session=args.session,
@@ -1624,6 +1752,7 @@ def events_cmd(args: argparse.Namespace) -> int:
             topic=args.topic,
             unread=args.unread,
             consumer=consumer,
+            since_created_at=since_created_at,
         )
         if args.limit and len(events) > args.limit:
             events = events[-args.limit :]
@@ -1635,6 +1764,8 @@ def events_cmd(args: argparse.Namespace) -> int:
         return 0 if events else 1
 
     if args.events_action == "wait":
+        since_created_at = event_cursor_from_args(root, args)
+        consumer = _resolve_consumer(args, session=args.session)
         deadline = time.monotonic() + args.timeout
         while True:
             events = list_events(
@@ -1644,6 +1775,7 @@ def events_cmd(args: argparse.Namespace) -> int:
                 topic=args.topic,
                 unread=True,
                 consumer=consumer,
+                since_created_at=since_created_at,
             )
             if events:
                 event = events[0]
@@ -1658,6 +1790,15 @@ def events_cmd(args: argparse.Namespace) -> int:
             time.sleep(args.interval)
 
     if args.events_action == "ack":
+        explicit_consumer = getattr(args, "consumer", None)
+        if explicit_consumer:
+            consumer = validate_consumer_name(explicit_consumer, source="--consumer")
+        else:
+            session = getattr(args, "session", None)
+            if not session:
+                event = load_event_file(events_dir(root) / f"{args.event_id}.json")
+                session = event.get("session") if event else None
+            consumer = default_consumer(session)
         path = ack_event(root, args.event_id, consumer)
         print(f"acked: {args.event_id}")
         print(path)
@@ -1671,21 +1812,42 @@ def board_cmd(args: argparse.Namespace) -> int:
     socket = socket_path(root, getattr(args, "socket", None))
 
     if args.board_action == "post":
-        session = args.session or infer_current_tmux_session(socket)
+        inferred_session = infer_current_tmux_session(socket)
+        session = args.session or inferred_session
+        from_agent = args.from_agent
+        if not from_agent:
+            registry = load_registry(registry_path(root))
+            if (
+                inferred_session
+                and session == inferred_session
+                and inferred_session in (registry.get("sessions") or {})
+            ):
+                from_agent = inferred_session
+            else:
+                raise SystemExit(
+                    "cannot infer poster; pass --from <name> or run inside a managed tmux pane"
+                )
         if args.body_file:
             body_path = Path(args.body_file).expanduser()
             body = body_path.read_text()
         elif args.body is not None:
             body = args.body
         else:
+            if sys.stdin.isatty():
+                raise SystemExit(
+                    "board post requires body text. Examples:\n"
+                    "  agent-tmux board post --topic review \"memo\"\n"
+                    "  printf '%s\\n' \"memo\" | agent-tmux board post --topic review\n"
+                    "  agent-tmux board post --topic review --body-file memo.md"
+                )
             body = sys.stdin.read()
         if not body.strip():
             raise SystemExit("board post requires non-empty body text")
-        message_id = unique_record_id("msg", args.topic, args.from_agent)
+        message_id = unique_record_id("msg", args.topic, from_agent)
         created_at = now_iso()
         metadata = {
             "id": message_id,
-            "from": args.from_agent,
+            "from": from_agent,
             "topic": args.topic,
             "created_at": created_at,
         }
@@ -1701,10 +1863,10 @@ def board_cmd(args: argparse.Namespace) -> int:
             {
                 "kind": "board_post",
                 "session": session,
-                "agent": args.from_agent,
+                "agent": from_agent,
                 "source": "agent_tmux",
                 "confidence": "explicit",
-                "summary": f"{args.from_agent} posted to {args.topic}",
+                "summary": f"{from_agent} posted to {args.topic}",
                 "read_command": read_command,
                 "message_id": message_id,
                 "topic": args.topic,
@@ -1721,6 +1883,8 @@ def board_cmd(args: argparse.Namespace) -> int:
 
     if args.board_action == "list":
         messages = list_board_messages(root, topic=args.topic)
+        if args.limit and len(messages) > args.limit:
+            messages = messages[-args.limit :]
         if args.json:
             print(json.dumps(messages, sort_keys=True))
             return 0
@@ -1910,27 +2074,21 @@ def doctor_cmd(args: argparse.Namespace) -> int:
     except Exception as exc:
         registry_error = str(exc)
 
-    registry_sessions = sorted((registry.get("sessions") or {}).keys())
+    view = compute_session_view(socket, registry)
+    registry_sessions = view["registered"]
+    live_names = view["live"]
+    missing_live = view["dead_but_registered"]
+    unregistered_live = view["unregistered_live"]
     probe = try_tmux(socket, [
         "list-sessions",
         "-F",
         "#{session_name}\t#{session_windows}\t#{session_attached}\t#{session_created}\t#{session_id}",
     ])
-    live_sessions: list[dict[str, Any]] = []
     issues: list[str] = []
-    if probe["ok"]:
-        for line in probe["stdout"].splitlines():
-            if not line.strip():
-                continue
-            parts = line.split("\t")
-            live_sessions.append({"name": parts[0], "raw": line})
-    else:
+    if not probe["ok"]:
         message = (probe["stdout"] + probe["stderr"]).strip()
         issues.append(classify_tmux_failure(socket, message))
 
-    live_names = sorted(session["name"] for session in live_sessions)
-    missing_live = [name for name in registry_sessions if name not in live_names]
-    unregistered_live = [name for name in live_names if name not in registry_sessions]
     if registry_error:
         issues.append("registry-unreadable")
     if registry.get("project_root") and Path(registry["project_root"]) != root:
@@ -1943,7 +2101,7 @@ def doctor_cmd(args: argparse.Namespace) -> int:
         issues.append("live-session-not-registered")
     if not socket.exists() and registry_sessions:
         issues.append("missing-socket-with-registered-sessions")
-    if not issues and live_sessions:
+    if not issues and live_names:
         issues.append("ok-live-sessions")
     elif not issues:
         issues.append("ok-no-live-sessions")
@@ -2231,6 +2389,8 @@ def parser() -> argparse.ArgumentParser:
     events_list.add_argument("--topic", help="Filter by board/event topic")
     events_list.add_argument("--unread", action="store_true", help="Only show events not acked by this consumer")
     events_list.add_argument("--consumer", help="Consumer name for unread filtering")
+    events_list.add_argument("--since-mark", help="Only show events created after a transcript mark")
+    events_list.add_argument("--from-now", action="store_true", help="Only show events created after invocation")
     events_list.add_argument("--limit", type=int, default=50)
     events_list.add_argument("--json", action="store_true")
     events_list.set_defaults(func=events_cmd)
@@ -2241,6 +2401,8 @@ def parser() -> argparse.ArgumentParser:
     events_wait.add_argument("--timeout", type=float, default=1800)
     events_wait.add_argument("--interval", type=float, default=1.0)
     events_wait.add_argument("--consumer", help="Consumer name for unread filtering")
+    events_wait.add_argument("--since-mark", help="Wait only for events created after a transcript mark")
+    events_wait.add_argument("--from-now", action="store_true", help="Wait only for events created after invocation")
     events_wait.add_argument("--ack", action="store_true", help="Ack the event before returning")
     events_wait.add_argument("--json", action="store_true")
     events_wait.add_argument("--quiet", action="store_true")
@@ -2248,19 +2410,21 @@ def parser() -> argparse.ArgumentParser:
     events_ack = events_sub.add_parser("ack", help="Acknowledge an event for a consumer")
     events_ack.add_argument("event_id")
     events_ack.add_argument("--consumer", help="Consumer name")
+    events_ack.add_argument("--session", help="Override session for consumer derivation; otherwise inferred from the event file")
     events_ack.set_defaults(func=events_cmd)
 
     board = command("board", help="Append-only message board for durable agent memos")
     board_sub = board.add_subparsers(dest="board_action", required=True)
     board_post = board_sub.add_parser("post", help="Post one immutable Markdown message")
     board_post.add_argument("--topic", required=True)
-    board_post.add_argument("--from", dest="from_agent", required=True)
+    board_post.add_argument("--from", dest="from_agent", help="Poster name; inferred inside a managed tmux pane")
     board_post.add_argument("--session", help="Related tmux session")
     board_post.add_argument("--body-file", help="Read message body from a file")
     board_post.add_argument("body", nargs="?", help="Message body; stdin is used if omitted")
     board_post.set_defaults(func=board_cmd)
     board_list = board_sub.add_parser("list", help="List board messages")
     board_list.add_argument("--topic")
+    board_list.add_argument("--limit", type=int, help="Show only the latest N matching messages")
     board_list.add_argument("--json", action="store_true")
     board_list.set_defaults(func=board_cmd)
     board_read = board_sub.add_parser("read", help="Read one board message by id")

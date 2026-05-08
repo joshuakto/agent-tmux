@@ -21,17 +21,14 @@ Use this skill when work needs a live terminal shared by an agent and a human.
 Use the project wrapper when present; otherwise replace `.agent/tmux` with `agent-tmux`.
 
 ```bash
-.agent/tmux launch --session <name> --purpose <purpose> --run "<agent command>" --log
+.agent/tmux launch --session <name> --agent claude --events --require-events --purpose <purpose> --run "claude --name <name>" --log
 .agent/tmux report
-.agent/tmux prompt <session> --agent claude "<instruction>"
-.agent/tmux read <session> --since-mark <mark-id> --lines 120
-.agent/tmux wait <session> "<pattern>" --since-mark <mark-id> --timeout 300
-.agent/tmux search <session> "<error|failed|complete>" --context 3
-.agent/tmux doctor --question "<what looked wrong>" --context "<what you were doing>"
-.agent/tmux attach <session>
+.agent/tmux prompt <session> --agent claude "<instruction; when finished or blocked, run: .agent/tmux board post --topic <topic> \"concise status memo\">"
+.agent/tmux events wait --session <session> --kind board_post,needs_input,permission_request,agent_stop,hook_error --since-mark <mark-id> --ack --json --timeout 1800
+.agent/tmux board read <message-id>
 ```
 
-`prompt` creates a transcript mark before sending and prints it in the receipt. After `prompt`, use that mark for follow-up reads and waits. Marks are out-of-band transcript offsets; they are not typed into the terminal.
+`prompt` creates a transcript mark before sending and prints it in the receipt. Use that mark for `events wait --since-mark` so stale unread events from earlier turns do not wake the manager. Marks are out-of-band transcript offsets and event cursors; they are not typed into the terminal.
 
 ## Manager-Agent Path
 
@@ -39,28 +36,28 @@ When supervising other terminal agents, prefer events and board memos over repea
 
 ```bash
 .agent/tmux launch --session <name> --agent claude --events --require-events --purpose <purpose> --run "claude --name <name>" --log
-.agent/tmux prompt <session> --agent claude "<instruction; post a board memo when done>"
-.agent/tmux events wait --session <session> --kind board_post,needs_input,permission_request,agent_stop,hook_error --ack --json --timeout 1800
+.agent/tmux prompt <session> --agent claude "<instruction; when finished or blocked, run: .agent/tmux board post --topic <topic> \"concise status memo\">"
+.agent/tmux events wait --session <session> --kind board_post,needs_input,permission_request,agent_stop,hook_error --since-mark <mark-id> --ack --json --timeout 1800
 ```
 
 For Codex CLI, use the same path with `--agent codex --run "codex"`. `--require-events` fails fast unless the session-local hook config is injected.
 
-`board post` auto-associates with the current session when it is run inside a managed tmux pane, so worker agents usually do not need to pass `--session`.
+`board post` auto-associates with the current session when it is run inside a managed tmux pane, so worker agents usually only need `--topic` and a memo body.
 
 Branch on the returned event: `board_post` -> `board read <message-id>`; `needs_input` or `permission_request` -> inspect or ask the human; `agent_stop` without a memo -> read recent output or prompt for a memo; `hook_error` -> run `hooks status` or `doctor`.
 
-Use `read`, `search`, and `attach` for recovery or evidence checks, not routine manager-agent notification. Events and board messages are coordination aids, not task truth.
+Use `read`, `wait`, `search`, and `attach` for recovery, non-agent shells, or evidence checks, not routine manager-agent notification. Events and board messages are coordination aids, not task truth.
 
 ## Decision Rules
 
 - Need to start shared work: `launch --log`, then `report`.
 - Need to send a user message to Claude/Codex/Gemini: use `prompt`, not raw `send`.
-- Need the response to your last prompt: use `read --since-mark <mark-id>`.
-- Need to wait for new output: use `wait --since-mark <mark-id>` or `wait --from-now`.
-- Session seems missing or socket access fails: run `doctor`; do not conclude absence from a failed probe.
+- Need the response to your last worker prompt: use `events wait --since-mark <mark-id>`, then `board read`.
+- Need raw terminal evidence: use `read --since-mark <mark-id>`, `wait --since-mark <mark-id>`, or `search`.
+- Session seems missing or socket access fails: `list`/`status` already flag `Dead but registered` for sessions killed externally. Run `doctor` for full diagnostics; do not conclude absence from a failed probe.
 - Human wants to inspect/interfere: report the `attach` command.
 - Need proof of completion: inspect artifacts/tests/branches, not logs or marks.
-- Supervising a worker agent: use `--require-events`, wait for attention events, then branch by event kind.
+- Supervising a worker agent: use `--require-events`, wait for attention events since the prompt mark, then branch by event kind.
 
 ## Load References Only When Needed
 
