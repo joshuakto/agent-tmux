@@ -61,8 +61,8 @@ agent-tmux action <session> escape --agent claude
 Use raw keys only as an escape hatch:
 
 ```bash
-agent-tmux keys <session> Tab Enter
-agent-tmux keys <session> C-c
+agent-tmux raw keys <session> Tab Enter
+agent-tmux raw keys <session> C-c
 ```
 
 ## Logs And Marks

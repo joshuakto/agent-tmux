@@ -4,13 +4,21 @@ Use this when a human wants to inspect or interfere with shared sessions directl
 
 ## Attach
 
-Prefer the project wrapper command shown by `report`:
+Prefer the no-arg project wrapper command shown by `report`:
+
+```bash
+.agent/tmux attach
+```
+
+With multiple live sessions this opens tmux's native session picker. With one live session it attaches directly.
+
+Direct attach still works when you know the session:
 
 ```bash
 .agent/tmux attach <session>
 ```
 
-Equivalent raw tmux form:
+Equivalent raw tmux form for direct attach:
 
 ```bash
 tmux -S /path/to/project/.agent/tmux.sock attach -t <session>
@@ -27,7 +35,7 @@ agent-tmux tmux-profile show
 agent-tmux tmux-profile apply
 ```
 
-The profile enables mouse support, larger scrollback, pane labels, a compact status line, and navigation bindings. It does not write `~/.tmux.conf`.
+The profile is applied automatically by `launch` and `attach`. It enables mouse support, larger scrollback, pane labels, a compact status line, and navigation bindings. It does not write `~/.tmux.conf`.
 
 ## Navigation
 

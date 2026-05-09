@@ -38,7 +38,7 @@ agent-tmux action reviewer escape --agent claude
 Use raw keys only when the profile action does not exist:
 
 ```bash
-agent-tmux keys reviewer Tab Enter
+agent-tmux raw keys reviewer Tab Enter
 ```
 
 ## Current Conservative Defaults

@@ -15,7 +15,7 @@ Vendor-neutral tmux session manager for shared human-agent terminals.
 - append-only manager-agent events under `.agent/tmux.d/events/`
 - append-only board messages under `.agent/board/`
 - optional native hook ingestion for supported terminal agents
-- read/write controls through `send`, `read`, `keys`, `interrupt`, `split`, `join-pane`, and `move-window`
+- input controls through `prompt`, `action`, `interrupt`, and advanced `raw send` / `raw keys`
 - a dumb project wrapper at `.agent/tmux`
 - Claude Code plugin metadata at `.claude-plugin/plugin.json`
 - optional Codex skill metadata under `skills/shared-tmux-terminal`
@@ -57,11 +57,14 @@ agent-tmux board read <message-id>
 With the project wrapper:
 
 ```bash
+.agent/tmux list
 .agent/tmux report
+.agent/tmux attach
 .agent/tmux attach reviewer
 ```
 
 Use the golden path for routine terminal-agent supervision. `prompt` prints a mark; use that mark with `events wait --since-mark` so stale unread events from earlier turns do not wake the manager. Events are wakeups and board posts are concise memos. Artifacts, tests, commits, process exit status, and explicit reports remain task truth.
+When continuing existing work, scan with `list` first and reuse only if there is an obvious matching live session. Fresh sessions are still the right default for new tasks.
 
 ## Basic Shared Terminal Path
 
@@ -69,9 +72,9 @@ Use this for shells, REPLs, dev servers, and inherited sessions that do not need
 
 ```bash
 agent-tmux launch --session shell --purpose repl --run "bash" --log
-agent-tmux prompt shell --agent generic "pwd"
-agent-tmux read shell --since-mark <mark-id> --lines 120
-agent-tmux wait shell "ready|failed" --since-mark <mark-id> --timeout 300
+agent-tmux raw send shell "pwd"
+agent-tmux read shell --lines 120
+agent-tmux wait shell "ready|failed" --from-now --timeout 300
 agent-tmux attach shell
 ```
 
@@ -104,6 +107,8 @@ optimize for:
 
 - Use `prompt` marks as the event cursor. `events wait --since-mark <mark-id>`
   prevents stale unread hook events from waking the manager after a new prompt.
+- Parallel `prompt` calls are safe across sessions and serialized per target
+  pane, so text and submit keys are not interleaved.
 - Treat native events as wakeups, not conclusions. Verify task truth from
   artifacts, commits, process status, and explicit board memos.
 - Keep persistence policy outside `agent-tmux`. The project should say where
@@ -114,6 +119,7 @@ optimize for:
   keep layering prompts into a stuck tool-call state.
 - Use `report` for cleanup review. Detached sessions are candidates to inspect
   or kill, but attached sessions may be under active human control.
+- Humans can run `attach` with no session name to open the live-session picker.
 
 ## Advanced Commands
 
@@ -128,9 +134,12 @@ agent-tmux read reviewer --lines 120
 agent-tmux read reviewer --all --number
 agent-tmux wait reviewer "tests passed|failed" --from-now --timeout 120
 agent-tmux dump reviewer --all
-agent-tmux send reviewer "npm test"
+agent-tmux raw send reviewer "npm test"
+agent-tmux raw keys reviewer Tab Enter
 agent-tmux action reviewer submit --agent claude
 agent-tmux interrupt reviewer
+agent-tmux attach
+agent-tmux attach reviewer
 agent-tmux tmux-profile apply
 ```
 
@@ -259,7 +268,7 @@ Native lifecycle events can be multiple per turn; raw events are kept for observ
 
 ## Human Tmux Profile
 
-For easier human inspection, apply the optional project-local tmux profile:
+For easier human inspection, `launch` and `attach` apply the project-local tmux profile automatically:
 
 ```bash
 agent-tmux tmux-profile show
@@ -270,7 +279,7 @@ The profile affects only the project tmux server. It enables mouse support, larg
 
 ## Agent UI Interaction
 
-Use `prompt` for terminal agents, not raw `send`, when the target is an interactive agent UI:
+Use `prompt` for terminal agents, not `raw send`, when the target is an interactive agent UI:
 
 ```bash
 agent-tmux prompt reviewer --agent claude "Summarize your progress and blockers."
@@ -301,6 +310,7 @@ Run it from the project root, or pass --cwd /path/to/project.
 
 Golden path:
 
+agent-tmux list
 agent-tmux launch --session <name> --agent claude --events --require-events --purpose <purpose> --run "claude --name <name>" --log
 agent-tmux report
 agent-tmux prompt <session> --agent claude "<instruction; when finished or blocked, run: agent-tmux board post --topic <topic> \"concise status memo\">"
@@ -311,7 +321,7 @@ If a session seems missing or socket access fails, diagnose with:
 agent-tmux doctor --question "<what looked wrong>" --context "<what you were doing>"
 
 If a human wants to inspect:
-agent-tmux attach <session>
+agent-tmux attach
 
 Use read/search/wait only for recovery or evidence checks.
 Do not treat logs, marks, events, or wait output as task truth.

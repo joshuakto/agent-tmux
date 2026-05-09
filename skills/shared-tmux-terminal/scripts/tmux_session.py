@@ -275,11 +275,21 @@ def run_tmux(
     input_text: str | None = None,
 ) -> subprocess.CompletedProcess[str]:
     cmd = ["tmux", "-S", str(socket), *args]
-    env = {key: value for key, value in os.environ.items() if key != "TMUX"}
-    result = subprocess.run(cmd, text=True, input=input_text, capture_output=capture or check, check=False, env=env)
+    result = subprocess.run(
+        cmd,
+        text=True,
+        input=input_text,
+        capture_output=capture or check,
+        check=False,
+        env=tmux_env_without_client(),
+    )
     if check and result.returncode != 0:
         raise TmuxError(cmd, result.returncode, result.stdout or "", result.stderr or "")
     return result
+
+
+def tmux_env_without_client() -> dict[str, str]:
+    return {key: value for key, value in os.environ.items() if key != "TMUX"}
 
 
 def tmux_output(socket: Path, args: list[str]) -> str:
@@ -291,9 +301,8 @@ def tmux_output(socket: Path, args: list[str]) -> str:
 
 def try_tmux(socket: Path, args: list[str]) -> dict[str, Any]:
     cmd = ["tmux", "-S", str(socket), *args]
-    env = {key: value for key, value in os.environ.items() if key != "TMUX"}
     try:
-        result = subprocess.run(cmd, text=True, capture_output=True, check=False, env=env)
+        result = subprocess.run(cmd, text=True, capture_output=True, check=False, env=tmux_env_without_client())
     except OSError as exc:
         return {
             "cmd": cmd,
@@ -309,6 +318,33 @@ def try_tmux(socket: Path, args: list[str]) -> dict[str, Any]:
         "stderr": result.stderr or "",
         "ok": result.returncode == 0,
     }
+
+
+def current_tmux_socket() -> Path | None:
+    tmux_env = os.environ.get("TMUX")
+    if not tmux_env:
+        return None
+    socket_text = tmux_env.split(",", 1)[0]
+    if not socket_text:
+        return None
+    return Path(socket_text).expanduser()
+
+
+def same_socket(left: Path, right: Path) -> bool:
+    try:
+        return left.samefile(right)
+    except OSError:
+        return left.resolve() == right.resolve()
+
+
+def inside_project_tmux(socket: Path) -> bool:
+    current = current_tmux_socket()
+    return bool(current and same_socket(current, socket))
+
+
+def apply_tmux_profile(socket: Path) -> None:
+    for command in TMUX_PROFILE_COMMANDS:
+        run_tmux(socket, command)
 
 
 def classify_tmux_failure(socket: Path, message: str) -> str:
@@ -857,10 +893,23 @@ def target_for_args(socket: Path, session: str, pane: str | None) -> str:
     return active_pane_target(session, panes)
 
 
+def prompt_lock_path(root: Path, target: str) -> Path:
+    safe_target = re.sub(r"[^A-Za-z0-9_.:%-]+", "_", target).strip("._:-%") or "target"
+    return root / ".agent" / "tmux.d" / "locks" / f"prompt-{safe_target}"
+
+
+def unique_tmux_buffer_name() -> str:
+    return f"agent-tmux-{os.getpid()}-{uuid.uuid4().hex}"
+
+
 def send_text(socket: Path, target: str, text: str) -> None:
     if "\n" in text or len(text) > 500:
-        run_tmux(socket, ["load-buffer", "-b", "agent-tmux", "-"], input_text=text)
-        run_tmux(socket, ["paste-buffer", "-b", "agent-tmux", "-t", target, "-d"])
+        buffer_name = unique_tmux_buffer_name()
+        try:
+            run_tmux(socket, ["load-buffer", "-b", buffer_name, "-"], input_text=text)
+            run_tmux(socket, ["paste-buffer", "-b", buffer_name, "-t", target, "-d"])
+        finally:
+            run_tmux(socket, ["delete-buffer", "-b", buffer_name], capture=True, check=False)
         return
     run_tmux(socket, ["send-keys", "-t", target, "-l", text])
 
@@ -875,9 +924,23 @@ def send_profile_action(socket: Path, target: str, profile: dict[str, Any], acti
 
 
 def user_command(root: Path, args: str) -> str:
-    if (root / ".agent" / "tmux").exists():
-        return f".agent/tmux {args}"
-    return f"agent-tmux {args}"
+    wrapper = root / ".agent" / "tmux"
+    if wrapper.exists():
+        command = shlex.quote(str(wrapper))
+    else:
+        command = f"agent-tmux --cwd {shlex.quote(str(root))}"
+    return f"{command} {args}".rstrip()
+
+
+def last_nonblank_line(text: str, *, max_length: int = 140) -> str:
+    for line in reversed(text.splitlines()):
+        line = re.sub(r"\s+", " ", line).strip()
+        if not line:
+            continue
+        if len(line) > max_length:
+            return line[: max_length - 3] + "..."
+        return line
+    return ""
 
 
 def tail_lines(text: str, limit: int = 12) -> str:
@@ -1104,6 +1167,7 @@ def print_report(root: Path, socket: Path, registry: dict[str, Any], *, lines: i
     if view["tmux_error"]:
         print(f"tmux probe failed: {view['tmux_error']}")
     print(f"Live sessions: {len(sessions)}")
+    print(f"Attach picker: {user_command(root, 'attach')}")
     detached = [sess["name"] for sess in sessions if not sess["attached"]]
     attached = [sess["name"] for sess in sessions if sess["attached"]]
     if detached:
@@ -1258,6 +1322,7 @@ def launch(args: argparse.Namespace) -> int:
         else:
             run_tmux(socket, ["new-session", "-Ad", "-s", session, "-c", str(root)])
             mode = "started"
+    apply_tmux_profile(socket)
 
     log_path: Path | None = None
     if args.log:
@@ -1309,6 +1374,7 @@ def launch(args: argparse.Namespace) -> int:
     print(f"{mode}: {session}")
     print(f"socket: {socket}")
     print(f"attach: {user_command(root, f'attach {session}')}")
+    print(f"attach picker: {user_command(root, 'attach')}")
     print(f"tmux attach: tmux -S {socket} attach -t {session}")
     print(f"cwd: {root}")
     print(f"registry: {registry_file}")
@@ -1333,7 +1399,7 @@ def launch(args: argparse.Namespace) -> int:
     if effective_run:
         print(f"initial command sent: {effective_run}")
     if args.attach:
-        os.execvp("tmux", ["tmux", "-S", str(socket), "attach", "-t", session])
+        return attach_project_tmux(root, socket, session)
     return 0
 
 
@@ -1365,10 +1431,24 @@ def list_cmd(args: argparse.Namespace) -> int:
         panes = list_panes(socket, name)
         reg = registry.get("sessions", {}).get(name, {})
         purpose = reg.get("purpose", "")
-        print(
-            f"- {name}  windows={sess['windows']}  panes={len(panes)}  "
-            f"attached={'yes' if sess['attached'] else 'no'}  purpose={purpose}"
-        )
+        agent = reg.get("agent", "")
+        active = next((pane for pane in panes if pane["active"]), panes[0] if panes else None)
+        fields = [
+            f"- {name}",
+            f"attached={'yes' if sess['attached'] else 'no'}",
+            f"panes={len(panes)}",
+        ]
+        if active:
+            target = f"{name}:{active['window_index']}.{active['pane_index']}"
+            fields.append(f"cmd={active['command']}")
+            last_line = last_nonblank_line(capture_pane(socket, target, lines=20))
+            if last_line:
+                fields.append(f'last="{last_line}"')
+        if agent:
+            fields.append(f"agent={agent}")
+        if purpose:
+            fields.append(f"purpose={purpose}")
+        print("  ".join(fields))
     if view["dead_but_registered"]:
         print(f"Dead but registered: {', '.join(view['dead_but_registered'])}")
     return 0
@@ -1418,6 +1498,7 @@ def status_cmd(args: argparse.Namespace) -> int:
     print(f"Purpose: {reg.get('purpose', '')}")
     print(f"Cwd: {reg.get('cwd', '')}")
     print(f"Attach: {user_command(root, f'attach {session}')}")
+    print(f"Attach picker: {user_command(root, 'attach')}")
     print(f"Tmux attach: tmux -S {socket} attach -t {session}")
     print(f"Windows: {sess['windows'] if sess else len({p['window_index'] for p in panes})}")
     for pane in panes:
@@ -1447,7 +1528,7 @@ def send_cmd(args: argparse.Namespace) -> int:
 def keys_cmd(args: argparse.Namespace) -> int:
     root = project_root(Path(args.cwd) if args.cwd else None)
     socket = socket_path(root, args.socket)
-    target = args.pane or args.session
+    target = target_for_args(socket, args.session, args.pane)
     run_tmux(socket, ["send-keys", "-t", target, *args.keys])
     return 0
 
@@ -1634,20 +1715,21 @@ def prompt_cmd(args: argparse.Namespace) -> int:
     target = target_for_args(socket, args.session, args.pane)
     profile_name, profile = resolve_profile(args.agent)
     mark_id = None
-    if args.mark:
-        mark_id, _mark, changed = create_mark(
-            root,
-            socket,
-            registry,
-            args.session,
-            target,
-            label=args.mark_label or "prompt",
-        )
-        if changed:
-            save_registry_session(registry_file, registry, session_name_from_target(args.session, target))
-    send_text(socket, target, args.text)
-    if args.submit:
-        send_profile_action(socket, target, profile, "submit")
+    with file_lock(prompt_lock_path(root, target)):
+        if args.mark:
+            mark_id, _mark, changed = create_mark(
+                root,
+                socket,
+                registry,
+                args.session,
+                target,
+                label=args.mark_label or "prompt",
+            )
+            if changed:
+                save_registry_session(registry_file, registry, session_name_from_target(args.session, target))
+        send_text(socket, target, args.text)
+        if args.submit:
+            send_profile_action(socket, target, profile, "submit")
     if not args.quiet:
         suffix = f" mark={mark_id}" if mark_id else ""
         print(f"prompt sent: target={target} profile={profile_name} submitted={'yes' if args.submit else 'no'}{suffix}")
@@ -2007,8 +2089,7 @@ def tmux_profile_cmd(args: argparse.Namespace) -> int:
 
     ensure_parent(socket)
     run_tmux(socket, ["start-server"])
-    for command in TMUX_PROFILE_COMMANDS:
-        run_tmux(socket, command)
+    apply_tmux_profile(socket)
     print(f"tmux profile applied: {socket}")
     print("scope: project tmux server only")
     return 0
@@ -2151,11 +2232,68 @@ def doctor_cmd(args: argparse.Namespace) -> int:
     return 0 if all(issue.startswith("ok-") for issue in issues) else 1
 
 
+def run_tmux_in_current_client(socket: Path, args: list[str]) -> None:
+    cmd = ["tmux", "-S", str(socket), *args]
+    result = subprocess.run(cmd, text=True, capture_output=True, check=False)
+    if result.returncode != 0:
+        raise TmuxError(cmd, result.returncode, result.stdout or "", result.stderr or "")
+
+
+def exec_tmux_client(socket: Path, args: list[str]) -> None:
+    os.execvpe("tmux", ["tmux", "-S", str(socket), *args], tmux_env_without_client())
+
+
+def attach_project_tmux(root: Path, socket: Path, session: str | None = None) -> int:
+    registry = load_registry(registry_path(root))
+    view = compute_session_view(socket, registry)
+    live = view["live"]
+
+    if session:
+        if session not in live:
+            if session in view["dead_but_registered"]:
+                print(f"Session not live (registered, killed externally): {session}")
+            else:
+                print(f"Session not found: {session}")
+            if live:
+                print(f"Open picker: {user_command(root, 'attach')}")
+            if view["dead_but_registered"]:
+                print(f"Dead but registered: {', '.join(view['dead_but_registered'])}")
+            print(f"List sessions: {user_command(root, 'list')}")
+            print(f"Diagnose: {user_command(root, 'doctor')}")
+            return 1
+        target_session = session
+    else:
+        if not live:
+            print(f"No live tmux sessions found at {socket}")
+            if view["tmux_error"]:
+                print(f"tmux probe failed: {view['tmux_error']}")
+            if view["dead_but_registered"]:
+                print(f"Dead but registered: {', '.join(view['dead_but_registered'])}")
+            print(f"List sessions: {user_command(root, 'list')}")
+            print(f"Diagnose: {user_command(root, 'doctor')}")
+            return 1
+        target_session = live[0] if len(live) == 1 else None
+
+    apply_tmux_profile(socket)
+
+    if inside_project_tmux(socket):
+        if target_session:
+            run_tmux_in_current_client(socket, ["switch-client", "-t", target_session])
+        else:
+            run_tmux_in_current_client(socket, ["choose-tree", "-Zs"])
+        return 0
+
+    if target_session:
+        exec_tmux_client(socket, ["attach-session", "-t", target_session])
+    else:
+        exec_tmux_client(socket, ["attach-session", "-t", live[0], ";", "choose-tree", "-Zs"])
+    return 0
+
+
 def attach_cmd(args: argparse.Namespace) -> int:
     root = project_root(Path(args.cwd) if args.cwd else None)
     socket = socket_path(root, args.socket)
-    os.execvp("tmux", ["tmux", "-S", str(socket), "attach", "-t", args.session])
-    return 0
+    return attach_project_tmux(root, socket, args.session)
 
 
 def interrupt_cmd(args: argparse.Namespace) -> int:
@@ -2276,18 +2414,36 @@ def parser() -> argparse.ArgumentParser:
     status.add_argument("--lines", type=int, default=60)
     status.set_defaults(func=status_cmd)
 
-    send = command("send", help="Send literal text to the active pane of a session")
-    send.add_argument("session")
-    send.add_argument("text")
-    send.add_argument("--pane", help="Explicit pane target, e.g. session:0.0")
-    send.add_argument("--no-enter", action="store_true", help="Do not press Enter after sending")
-    send.set_defaults(func=send_cmd)
+    raw = command(
+        "raw",
+        help="Advanced low-level tmux input for shells, REPLs, and recovery",
+        description="Advanced low-level tmux input for shells, REPLs, and recovery.",
+    )
+    raw_sub = raw.add_subparsers(dest="raw_cmd", required=True)
 
-    keys = command("keys", help="Send raw tmux keys")
-    keys.add_argument("session")
-    keys.add_argument("keys", nargs="+")
-    keys.add_argument("--pane", help="Explicit pane target, e.g. session:0.0")
-    keys.set_defaults(func=keys_cmd)
+    def raw_command(name: str, **kwargs: Any) -> argparse.ArgumentParser:
+        cmd = raw_sub.add_parser(name, **kwargs)
+        cmd.add_argument("--socket", default=argparse.SUPPRESS, help="Override tmux socket path")
+        cmd.add_argument("--cwd", default=argparse.SUPPRESS, help="Project directory to use instead of the current directory")
+        return cmd
+
+    raw_send = raw_command(
+        "send",
+        help="Advanced/raw: send literal text. Do not use for Claude/Codex/Gemini prompts; use prompt instead.",
+        description="Advanced/raw: send literal text to a pane. Do not use this for Claude/Codex/Gemini prompts; use prompt instead.",
+    )
+    raw_send.add_argument("session")
+    raw_send.add_argument("text")
+    raw_send.add_argument("--pane", help="Explicit pane target, e.g. session:0.0")
+    raw_send.add_argument("--enter", dest="enter", action="store_true", default=True, help="Press Enter after sending (default)")
+    raw_send.add_argument("--no-enter", dest="enter", action="store_false", help="Do not press Enter after sending")
+    raw_send.set_defaults(func=send_cmd)
+
+    raw_keys = raw_command("keys", help="Advanced/raw: send tmux key names directly")
+    raw_keys.add_argument("session")
+    raw_keys.add_argument("keys", nargs="+")
+    raw_keys.add_argument("--pane", help="Explicit pane target, e.g. session:0.0")
+    raw_keys.set_defaults(func=keys_cmd)
 
     read = command("read", help="Capture pane history")
     read.add_argument("session")
@@ -2341,7 +2497,7 @@ def parser() -> argparse.ArgumentParser:
     wait.add_argument("--max-bytes", type=int, default=0, help="Maximum transcript bytes to search after the start offset; 0 means no limit")
     wait.set_defaults(func=wait_cmd)
 
-    prompt = command("prompt", help="Send text to a terminal agent and submit using an agent profile")
+    prompt = command("prompt", help="Send a user-message to a terminal agent using an agent profile")
     prompt.add_argument("session")
     prompt.add_argument("text")
     prompt.add_argument("--pane", help="Explicit pane target, e.g. session:0.0")
@@ -2358,7 +2514,7 @@ def parser() -> argparse.ArgumentParser:
     mark.add_argument("--label", help="Optional human-readable label")
     mark.set_defaults(func=mark_cmd)
 
-    action = command("action", help="Send a named action from an agent profile")
+    action = command("action", help="Send a profile action, usually for existing UI text or recovery")
     action.add_argument("session")
     action.add_argument("action", help="Profile action, e.g. submit, interrupt, eof, escape, clear")
     action.add_argument("--pane", help="Explicit pane target, e.g. session:0.0")
@@ -2476,8 +2632,12 @@ def parser() -> argparse.ArgumentParser:
     log_status.add_argument("--pane", help="Explicit pane target, e.g. session:0.0")
     log_status.set_defaults(func=log_cmd)
 
-    attach = command("attach", help="Attach to a session")
-    attach.add_argument("session")
+    attach = command("attach", help="Attach to a session, or open the live-session picker when omitted")
+    attach.add_argument(
+        "session",
+        nargs="?",
+        help="Optional live session name; omit to open the picker or attach the only live session",
+    )
     attach.set_defaults(func=attach_cmd)
 
     interrupt = command("interrupt", help="Send Ctrl-C to a session or pane")
@@ -2530,11 +2690,6 @@ def main() -> int:
             root = project_root(Path(args.cwd) if getattr(args, "cwd", None) else None)
             print_tmux_error(root, socket_path(root, getattr(args, "socket", None)), exc, context="launch")
             return 2
-    if getattr(args, "cmd", None) == "send":
-        if args.no_enter:
-            args.enter = False
-        else:
-            args.enter = True
     try:
         return args.func(args)
     except TmuxError as exc:
