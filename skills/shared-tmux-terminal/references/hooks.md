@@ -51,7 +51,7 @@ and rewrites simple `codex ...` launch commands to:
 .agent/tmux.d/hooks/<session>/codex-with-hooks ...
 ```
 
-The wrapper runs `codex -c hooks=...` internally so the visible tmux command stays readable.
+The wrapper runs `codex -c "$(cat .agent/tmux.d/hooks/<session>/codex-hooks.toml)" ...` internally. The TOML file is a single inline `hooks={SessionStart=[...],UserPromptSubmit=[...],Stop=[...],PermissionRequest=[...]}` table, so the visible tmux command stays readable.
 
 ## Hook Adapter
 
@@ -63,7 +63,18 @@ agent-tmux hooks show-config --agent claude --session reviewer
 agent-tmux hooks show-config --agent codex --session reviewer
 ```
 
-`hooks ingest` reads vendor hook JSON from stdin and emits canonical events such as `agent_stop`, `needs_input`, `permission_request`, and `hook_error`.
+`hooks ingest` reads vendor hook JSON from stdin and emits a canonical event. The mapping is:
+
+- `Stop`, `SubagentStop`, `AfterAgent` -> `agent_stop`
+- `StopFailure` -> `hook_error`
+- `Notification` -> `needs_input`
+- `PermissionRequest` -> `permission_request`
+- `SessionStart` -> `session_started`
+- `UserPromptSubmit` -> `prompt_submitted`
+- `PreToolUse`, `PostToolUse` -> `tool_event`
+- anything else -> `agent_event`
+
+The recommended manager attention set is `board_post,needs_input,permission_request,agent_stop,hook_error`. The other kinds are observability records — include them in `--kind` only when you want to watch session lifecycle, prompt submissions, or tool calls.
 
 The adapter is observability-only. It never approves, denies, or changes a permission decision.
 

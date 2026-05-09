@@ -30,11 +30,26 @@ Use comma-separated `--kind` values when waiting for any attention event.
 
 ## Event Meaning
 
+Recommended attention kinds (use these in `--kind` for the manager loop):
+
 - `agent_stop`: a native hook says the worker turn ended.
 - `needs_input`: the worker or native hook says attention is needed.
 - `permission_request`: the worker requested permission; do not auto-approve.
+- `hook_error`: a native stop-hook failure was reported; run `hooks status` or `doctor`.
 - `board_post`: a durable board memo was posted.
-- `session_started`: `agent-tmux launch` created or reused a session.
+
+Session lifecycle (emitted by `agent-tmux launch`, not in the recommended attention set):
+
+- `session_started`: `launch` created a new session.
+- `session_reused`: `launch` attached to an existing session in the registry.
+
+Observability-only kinds (emitted by `hooks ingest` from native hooks, not in the recommended attention set):
+
+- `prompt_submitted`: vendor `UserPromptSubmit` hook fired.
+- `tool_event`: vendor `PreToolUse`/`PostToolUse` hook fired.
+- `agent_event`: catch-all for any other vendor hook payload.
+
+Add these kinds to `--kind` only when you specifically want to observe them; the routine manager loop should stay on the attention set above.
 
 ## Manager Branches
 

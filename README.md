@@ -328,7 +328,7 @@ Do not treat logs, marks, events, or wait output as task truth.
 Task truth comes from artifacts, tests, commits, process exit status, and explicit reports.
 ```
 
-The same text is available in `skills/shared-tmux-terminal/references/agent-contract.md`.
+A numbered, more detailed version of this contract is in `skills/shared-tmux-terminal/references/agent-contract.md`.
 
 ## Claude Code Plugin
 
