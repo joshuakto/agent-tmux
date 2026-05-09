@@ -417,11 +417,22 @@ def load_event_file(path: Path) -> dict[str, Any] | None:
     return data
 
 
+ATTENTION_KINDS = "board_post,needs_input,permission_request,agent_stop,hook_error"
+
+
 def parse_kind_filter(kind: str | None) -> set[str] | None:
     if not kind:
         return None
     kinds = {part.strip() for part in kind.split(",") if part.strip()}
     return kinds or None
+
+
+def resolve_kind_default(kind: str | None) -> str | None:
+    if kind is None:
+        return ATTENTION_KINDS
+    if kind == "all":
+        return None
+    return kind
 
 
 def list_events(
@@ -615,7 +626,7 @@ def claude_hook_settings(root: Path, session: str) -> dict[str, Any]:
     }
 
 
-CODEX_HOOK_EVENTS = ["SessionStart", "UserPromptSubmit", "Stop", "PermissionRequest"]
+CODEX_HOOK_EVENTS = ["Stop", "PermissionRequest"]
 
 
 def toml_string(value: str) -> str:
@@ -884,6 +895,10 @@ def resolve_profile(name: str | None) -> tuple[str, dict[str, Any]]:
             return profile_name, profile
     known = ", ".join(sorted(AGENT_PROFILES))
     raise SystemExit(f"Unknown agent profile: {name}. Known profiles: {known}")
+
+
+def infer_session_agent(registry: dict[str, Any], session: str) -> str | None:
+    return ((registry.get("sessions") or {}).get(session) or {}).get("agent")
 
 
 def target_for_args(socket: Path, session: str, pane: str | None) -> str:
@@ -1713,7 +1728,8 @@ def prompt_cmd(args: argparse.Namespace) -> int:
     registry_file = registry_path(root)
     registry = load_registry(registry_file)
     target = target_for_args(socket, args.session, args.pane)
-    profile_name, profile = resolve_profile(args.agent)
+    agent_name = args.agent or infer_session_agent(registry, args.session)
+    profile_name, profile = resolve_profile(agent_name)
     mark_id = None
     with file_lock(prompt_lock_path(root, target)):
         if args.mark:
@@ -1755,8 +1771,10 @@ def mark_cmd(args: argparse.Namespace) -> int:
 def action_cmd(args: argparse.Namespace) -> int:
     root = project_root(Path(args.cwd) if args.cwd else None)
     socket = socket_path(root, args.socket)
+    registry = load_registry(registry_path(root))
     target = target_for_args(socket, args.session, args.pane)
-    profile_name, profile = resolve_profile(args.agent)
+    agent_name = args.agent or infer_session_agent(registry, args.session)
+    profile_name, profile = resolve_profile(agent_name)
     send_profile_action(socket, target, profile, args.action)
     if not args.quiet:
         print(f"action sent: target={target} profile={profile_name} action={args.action}")
@@ -1830,7 +1848,7 @@ def events_cmd(args: argparse.Namespace) -> int:
         events = list_events(
             root,
             session=args.session,
-            kind=args.kind,
+            kind=resolve_kind_default(args.kind),
             topic=args.topic,
             unread=args.unread,
             consumer=consumer,
@@ -1853,7 +1871,7 @@ def events_cmd(args: argparse.Namespace) -> int:
             events = list_events(
                 root,
                 session=args.session,
-                kind=args.kind,
+                kind=resolve_kind_default(args.kind),
                 topic=args.topic,
                 unread=True,
                 consumer=consumer,
@@ -2501,7 +2519,7 @@ def parser() -> argparse.ArgumentParser:
     prompt.add_argument("session")
     prompt.add_argument("text")
     prompt.add_argument("--pane", help="Explicit pane target, e.g. session:0.0")
-    prompt.add_argument("--agent", default="generic", help="Agent profile: claude, codex, gemini, generic")
+    prompt.add_argument("--agent", help="Agent profile (claude, codex, gemini, generic). Inferred from the session registry if omitted.")
     prompt.add_argument("--no-submit", dest="submit", action="store_false", help="Paste text but do not submit")
     prompt.add_argument("--no-mark", dest="mark", action="store_false", help="Do not create a transcript mark before sending")
     prompt.add_argument("--mark-label", help="Optional label for the pre-send mark")
@@ -2518,7 +2536,7 @@ def parser() -> argparse.ArgumentParser:
     action.add_argument("session")
     action.add_argument("action", help="Profile action, e.g. submit, interrupt, eof, escape, clear")
     action.add_argument("--pane", help="Explicit pane target, e.g. session:0.0")
-    action.add_argument("--agent", default="generic", help="Agent profile: claude, codex, gemini, generic")
+    action.add_argument("--agent", help="Agent profile (claude, codex, gemini, generic). Inferred from the session registry if omitted.")
     action.add_argument("--quiet", action="store_true")
     action.set_defaults(func=action_cmd)
 
@@ -2541,7 +2559,13 @@ def parser() -> argparse.ArgumentParser:
     events_emit.set_defaults(func=events_cmd)
     events_list = events_sub.add_parser("list", help="List events")
     events_list.add_argument("--session", help="Filter by session")
-    events_list.add_argument("--kind", help="Filter by event kind; comma-separated means any matching kind")
+    events_list.add_argument(
+        "--kind",
+        help=(
+            "Filter by event kind; comma-separated means any matching kind. "
+            f"Default: {ATTENTION_KINDS}. Pass 'all' for no filter."
+        ),
+    )
     events_list.add_argument("--topic", help="Filter by board/event topic")
     events_list.add_argument("--unread", action="store_true", help="Only show events not acked by this consumer")
     events_list.add_argument("--consumer", help="Consumer name for unread filtering")
@@ -2552,7 +2576,13 @@ def parser() -> argparse.ArgumentParser:
     events_list.set_defaults(func=events_cmd)
     events_wait = events_sub.add_parser("wait", help="Wait for the next unread event")
     events_wait.add_argument("--session", help="Filter by session")
-    events_wait.add_argument("--kind", help="Filter by event kind; comma-separated means any matching kind")
+    events_wait.add_argument(
+        "--kind",
+        help=(
+            "Filter by event kind; comma-separated means any matching kind. "
+            f"Default: {ATTENTION_KINDS}. Pass 'all' for no filter."
+        ),
+    )
     events_wait.add_argument("--topic", help="Filter by board/event topic")
     events_wait.add_argument("--timeout", type=float, default=1800)
     events_wait.add_argument("--interval", type=float, default=1.0)

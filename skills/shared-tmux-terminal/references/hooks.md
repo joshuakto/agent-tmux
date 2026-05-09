@@ -6,8 +6,8 @@ Use native hooks when a manager agent needs reliable wakeups from a terminal-age
 
 ```bash
 agent-tmux launch --session reviewer --agent claude --events --require-events --run "claude --name reviewer" --log
-agent-tmux prompt reviewer --agent claude "<task; when finished or blocked, run: agent-tmux board post --topic review \"concise status memo\">"
-agent-tmux events wait --session reviewer --kind board_post,needs_input,permission_request,agent_stop,hook_error --since-mark <mark-id> --ack --json --timeout 1800
+agent-tmux prompt reviewer "<task; when finished or blocked, run: agent-tmux board post --topic review \"concise status memo\">"
+agent-tmux events wait --session reviewer --since-mark <mark-id> --ack --json --timeout 1800
 ```
 
 `--require-events` fails launch unless `agent-tmux` can verify session-local hook wiring *and* resolve the run-command binary (`shutil.which` for bare names, `is_file()` + executable check for absolute paths). Relative paths with separators (e.g. `./bin/claude`) are rejected — pass an absolute path or a `PATH`-resolvable name.
@@ -16,11 +16,13 @@ agent-tmux events wait --session reviewer --kind board_post,needs_input,permissi
 
 ```bash
 agent-tmux launch --session reviewer --agent codex --events --require-events --run "codex" --log
-agent-tmux prompt reviewer --agent codex "<task; when finished or blocked, run: agent-tmux board post --topic review \"concise status memo\">"
-agent-tmux events wait --session reviewer --kind board_post,needs_input,permission_request,agent_stop,hook_error --since-mark <mark-id> --ack --json --timeout 1800
+agent-tmux prompt reviewer "<task; when finished or blocked, run: agent-tmux board post --topic review \"concise status memo\">"
+agent-tmux events wait --session reviewer --since-mark <mark-id> --ack --json --timeout 1800
 ```
 
 Codex CLI hook config is passed through a short session-local wrapper. `agent-tmux` does not edit `~/.codex/hooks.json` or project config.
+
+`prompt` infers the agent profile from the session registry, so `--agent` is only needed at launch. `events wait`/`list` default to the manager attention set; pass `--kind all` to widen.
 
 ## What Launch Writes
 
@@ -51,7 +53,7 @@ and rewrites simple `codex ...` launch commands to:
 .agent/tmux.d/hooks/<session>/codex-with-hooks ...
 ```
 
-The wrapper runs `codex -c "$(cat .agent/tmux.d/hooks/<session>/codex-hooks.toml)" ...` internally. The TOML file is a single inline `hooks={SessionStart=[...],UserPromptSubmit=[...],Stop=[...],PermissionRequest=[...]}` table, so the visible tmux command stays readable.
+The wrapper runs `codex -c "$(cat .agent/tmux.d/hooks/<session>/codex-hooks.toml)" ...` internally. The TOML file is a single inline `hooks={Stop=[...],PermissionRequest=[...]}` table, so the visible tmux command stays readable. Codex `SessionStart` and `UserPromptSubmit` are not wired by default — `launch` already emits a `session_started`/`session_reused` event, and prompt submissions have no manager branch.
 
 ## Hook Adapter
 
@@ -74,7 +76,7 @@ agent-tmux hooks show-config --agent codex --session reviewer
 - `PreToolUse`, `PostToolUse` -> `tool_event`
 - anything else -> `agent_event`
 
-The recommended manager attention set is `board_post,needs_input,permission_request,agent_stop,hook_error`. The other kinds are observability records — include them in `--kind` only when you want to watch session lifecycle, prompt submissions, or tool calls.
+The default `--kind` filter for `events wait`/`list` is `board_post,needs_input,permission_request,agent_stop,hook_error`. The other kinds (`session_started`, `prompt_submitted`, `tool_event`, `agent_event`) are observability records. By default, the only events `agent-tmux` wires for built-in vendors are the attention ones — Claude wires `Stop`/`SubagentStop`/`StopFailure`/`Notification`/`PermissionRequest`, and Codex wires `Stop`/`PermissionRequest`. If a vendor or user pipes a non-attention payload through `hooks ingest`, the canonical event is still emitted; pass `--kind all` (or an explicit list) on `events wait`/`list` to surface it.
 
 The adapter is observability-only. It never approves, denies, or changes a permission decision.
 

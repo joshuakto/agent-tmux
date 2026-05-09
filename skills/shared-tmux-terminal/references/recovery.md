@@ -53,10 +53,12 @@ If an interactive agent remains wedged after one interrupt, especially during a 
 Use profile actions before raw keys:
 
 ```bash
-agent-tmux action <session> submit --agent claude
-agent-tmux action <session> interrupt --agent claude
-agent-tmux action <session> escape --agent claude
+agent-tmux action <session> submit
+agent-tmux action <session> interrupt
+agent-tmux action <session> escape
 ```
+
+`action` (and `prompt`) infer the agent profile from the session registry; pass `--agent` only to override.
 
 Use raw keys only as an escape hatch:
 

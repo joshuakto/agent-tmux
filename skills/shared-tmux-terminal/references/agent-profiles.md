@@ -17,8 +17,10 @@ agent-tmux profiles --agent generic
 Use `prompt` when you want to send a user message to a terminal agent:
 
 ```bash
-agent-tmux prompt reviewer --agent claude "Summarize current status."
+agent-tmux prompt reviewer "Summarize current status."
 ```
+
+`prompt` and `action` infer the agent profile from the session registry. The `--agent` flag is only required at `launch`; pass it again only when you want to override the registered profile.
 
 `prompt` creates a transcript mark before sending by default. The mark is an out-of-band log offset and event cursor, not text typed into the terminal. In the manager-agent loop, use it with `events wait --since-mark`. Use transcript reads only when you need raw terminal evidence:
 
@@ -30,9 +32,9 @@ agent-tmux wait reviewer "complete|failed" --since-mark <mark-id> --timeout 300
 Use `action` when text is already present in the terminal UI or when you need a non-text key:
 
 ```bash
-agent-tmux action reviewer submit --agent claude
-agent-tmux action reviewer interrupt --agent claude
-agent-tmux action reviewer escape --agent claude
+agent-tmux action reviewer submit
+agent-tmux action reviewer interrupt
+agent-tmux action reviewer escape
 ```
 
 Use raw keys only when the profile action does not exist:

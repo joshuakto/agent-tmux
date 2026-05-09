@@ -16,39 +16,21 @@ Use this skill when work needs a live terminal shared by an agent and a human.
 - `agent-tmux` observes and controls terminal sessions. It does not decide task state.
 - Task truth comes from artifacts, tests, commits, process exit status, and explicit reports. Logs and marks are navigation aids only.
 
-## Golden Path First
+## Golden Path
 
 Use the project wrapper when present; otherwise replace `.agent/tmux` with `agent-tmux`.
 
 ```bash
 .agent/tmux launch --session <name> --agent claude --events --require-events --purpose <purpose> --run "claude --name <name>" --log
 .agent/tmux report
-.agent/tmux prompt <session> --agent claude "<instruction; when finished or blocked, run: .agent/tmux board post --topic <topic> \"concise status memo\">"
-.agent/tmux events wait --session <session> --kind board_post,needs_input,permission_request,agent_stop,hook_error --since-mark <mark-id> --ack --json --timeout 1800
+.agent/tmux prompt <session> "<instruction; when finished or blocked, run: .agent/tmux board post --topic <topic> \"concise status memo\">"
+.agent/tmux events wait --session <session> --since-mark <mark-id> --ack --json --timeout 1800
 .agent/tmux board read <message-id>
 ```
 
-`prompt` creates a transcript mark before sending and prints it in the receipt. Use that mark for `events wait --since-mark` so stale unread events from earlier turns do not wake the manager. Marks are out-of-band transcript offsets and event cursors; they are not typed into the terminal.
+`prompt` infers the agent profile from the session registry and prints a transcript mark in its receipt. `events wait` defaults to the manager attention set (`board_post,needs_input,permission_request,agent_stop,hook_error`); pass `--kind all` to widen.
 
-`prompt` is safe to use concurrently across sessions and is serialized per target pane, so text plus submit keys stay together.
-
-## Manager-Agent Path
-
-When supervising other terminal agents, prefer events and board memos over repeated pane polling:
-
-```bash
-.agent/tmux launch --session <name> --agent claude --events --require-events --purpose <purpose> --run "claude --name <name>" --log
-.agent/tmux prompt <session> --agent claude "<instruction; when finished or blocked, run: .agent/tmux board post --topic <topic> \"concise status memo\">"
-.agent/tmux events wait --session <session> --kind board_post,needs_input,permission_request,agent_stop,hook_error --since-mark <mark-id> --ack --json --timeout 1800
-```
-
-For Codex CLI, use the same path with `--agent codex --run "codex"`. `--require-events` fails fast unless the session-local hook config is injected.
-
-`board post` auto-associates with the current session when it is run inside a managed tmux pane, so worker agents usually only need `--topic` and a memo body.
-
-Branch on the returned event: `board_post` -> `board read <message-id>`; `needs_input` or `permission_request` -> inspect or ask the human; `agent_stop` without a memo -> read recent output or prompt for a memo; `hook_error` -> run `hooks status` or `doctor`.
-
-Use `read`, `wait`, `search`, and `attach` for recovery, non-agent shells, or evidence checks, not routine manager-agent notification. Events and board messages are coordination aids, not task truth.
+For Codex CLI sessions, launch with `--agent codex --run "codex"`. The rest of the loop is identical.
 
 ## Decision Rules
 
