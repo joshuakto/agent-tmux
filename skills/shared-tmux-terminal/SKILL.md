@@ -15,6 +15,7 @@ Use this skill when work needs a live terminal shared by an agent and a human.
 - Run from the project root; if uncertain, pass `--cwd /path/to/project`.
 - `agent-tmux` observes and controls terminal sessions. It does not decide task state.
 - Task truth comes from artifacts, tests, commits, process exit status, and explicit reports. Logs and marks are navigation aids only.
+- Requires tmux ≥ 3.2 (for `choose-tree -f` filtering). The session name `__agent_tmux_picker__` is reserved for the internal attach-picker lobby.
 
 ## Golden Path
 

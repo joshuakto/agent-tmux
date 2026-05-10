@@ -93,6 +93,28 @@ exit 1
 """
 
 
+# Internal lobby session used as the host pane for the attach-picker overlay.
+# Without it, the picker would have to overlay a real working agent's pane,
+# and one stray keystroke after dismiss would type into a live prompt.
+PICKER_SESSION = "__agent_tmux_picker__"
+PICKER_FILTER = "#{!=:#{session_name}," + PICKER_SESSION + "}"
+PICKER_SESSION_TREE_ARGS = ["choose-tree", "-Zs", "-f", PICKER_FILTER]
+PICKER_WINDOW_TREE_ARGS = ["choose-tree", "-Zw", "-f", PICKER_FILTER]
+
+
+def is_picker_target(value: str | None) -> bool:
+    # Match the lobby's exact name and any `name:...` form (window/pane refs).
+    return bool(value and (value == PICKER_SESSION or value.startswith(f"{PICKER_SESSION}:")))
+
+
+def reject_picker_target(value: str | None, *, command: str) -> None:
+    if is_picker_target(value):
+        raise SystemExit(
+            f"Session name '{PICKER_SESSION}' is reserved for the attach-picker lobby"
+            f" (cannot {command})"
+        )
+
+
 TMUX_PROFILE_COMMANDS: list[list[str]] = [
     ["set-option", "-g", "mouse", "on"],
     ["set-option", "-g", "history-limit", "50000"],
@@ -101,11 +123,14 @@ TMUX_PROFILE_COMMANDS: list[list[str]] = [
     ["set-option", "-g", "status-left-length", "40"],
     ["set-option", "-g", "status-right-length", "80"],
     ["set-option", "-g", "status-left", "[#S] "],
-    ["set-option", "-g", "status-right", "#{pane_id} #{pane_current_command} %H:%M"],
+    ["set-option", "-g", "status-right", "#{pane_id} %H:%M"],
     ["set-window-option", "-g", "pane-border-status", "top"],
-    ["set-window-option", "-g", "pane-border-format", "#P #{pane_id} #{pane_current_command}"],
-    ["bind-key", "S", "choose-tree", "-Zs"],
-    ["bind-key", "W", "choose-tree", "-Zw"],
+    ["set-window-option", "-g", "pane-border-format", "#P #{pane_id}"],
+    # Stop window names from picking up the foreground process's name (e.g.
+    # Claude Code's version string "2.1.x" leaking via setproctitle).
+    ["set-window-option", "-g", "automatic-rename", "off"],
+    ["bind-key", "S", *PICKER_SESSION_TREE_ARGS],
+    ["bind-key", "W", *PICKER_WINDOW_TREE_ARGS],
     ["bind-key", "P", "display-panes"],
 ]
 
@@ -342,9 +367,56 @@ def inside_project_tmux(socket: Path) -> bool:
     return bool(current and same_socket(current, socket))
 
 
+def require_tmux_version() -> None:
+    # `choose-tree -f` (the picker filter) needs tmux >= 3.2.
+    try:
+        result = subprocess.run(["tmux", "-V"], capture_output=True, text=True, check=True)
+    except FileNotFoundError:
+        raise SystemExit("agent-tmux requires tmux >= 3.2; `tmux` not found in PATH")
+    except subprocess.CalledProcessError as exc:
+        found = (exc.stderr or exc.stdout or "tmux -V failed").strip()
+        raise SystemExit(f"agent-tmux requires tmux >= 3.2; `tmux -V` failed: {found}")
+    match = re.search(r"^tmux\s+(?:next-)?(\d+)\.(\d+)", result.stdout)
+    if not match:
+        raise SystemExit(f"agent-tmux requires tmux >= 3.2; could not parse {result.stdout.strip()!r}")
+    if (int(match.group(1)), int(match.group(2))) < (3, 2):
+        raise SystemExit(f"agent-tmux requires tmux >= 3.2; found {result.stdout.strip()}")
+
+
 def apply_tmux_profile(socket: Path) -> None:
     for command in TMUX_PROFILE_COMMANDS:
         run_tmux(socket, command)
+
+
+def _picker_lobby_is_clean(socket: Path) -> bool:
+    # The lobby's invariant: exactly one pane running `tail`. Anything else
+    # (extra panes from split, a different command from raw tmux) means it
+    # has been contaminated and should be recreated.
+    try:
+        panes = list_panes(socket, PICKER_SESSION)
+    except TmuxError:
+        return False
+    return len(panes) == 1 and panes[0].get("command") == "tail"
+
+
+def ensure_picker_session(socket: Path) -> None:
+    # `tail -f /dev/null` is harmless foreground work; `_picker_lobby_is_clean` lets lazy creation recreate broken lobbies.
+    # `new-session -A` is unsafe here: if the session exists it redirects
+    # to `attach-session`, which hangs in a TTY or errors in a subprocess.
+    if try_tmux(socket, ["has-session", "-t", PICKER_SESSION])["ok"]:
+        if _picker_lobby_is_clean(socket):
+            return
+        run_tmux(socket, ["kill-session", "-t", PICKER_SESSION])
+    try:
+        run_tmux(socket, [
+            "new-session", "-d",
+            "-s", PICKER_SESSION,
+            "-n", "lobby",
+            "tail", "-f", "/dev/null",
+        ])
+    except TmuxError as exc:
+        if "duplicate session" not in exc.output.lower():
+            raise
 
 
 def classify_tmux_failure(socket: Path, message: str) -> str:
@@ -763,6 +835,8 @@ def list_sessions(socket: Path) -> list[dict[str, Any]]:
         if len(parts) < 5:
             continue
         name, windows, attached, created, session_id = parts[:5]
+        if name == PICKER_SESSION:
+            continue
         sessions.append(
             {
                 "name": name,
@@ -776,14 +850,16 @@ def list_sessions(socket: Path) -> list[dict[str, Any]]:
 
 
 def compute_session_view(socket: Path, registry: dict[str, Any]) -> dict[str, Any]:
-    registered = sorted((registry.get("sessions") or {}).keys())
+    registered = sorted(
+        name for name in (registry.get("sessions") or {}).keys()
+        if name != PICKER_SESSION
+    )
     live_sessions: list[dict[str, Any]] = []
     error: str | None = None
-    if socket.exists():
-        try:
-            live_sessions = list_sessions(socket)
-        except TmuxError as exc:
-            error = str(exc)
+    try:
+        live_sessions = list_sessions(socket)
+    except TmuxError as exc:
+        error = str(exc)
     live = sorted(s["name"] for s in live_sessions)
     reg_set = set(registered)
     live_set = set(live)
@@ -1292,6 +1368,7 @@ def launch(args: argparse.Namespace) -> int:
     registry = load_registry(registry_file)
 
     session = args.session or slugify(f"{root.name}-{args.purpose or 'agent'}-{datetime.now().strftime('%H%M%S')}")
+    reject_picker_target(session, command="launch")
     effective_run = args.run
     events_info: dict[str, Any] | None = None
     hook_warning: str | None = None
@@ -1746,7 +1823,16 @@ def prompt_cmd(args: argparse.Namespace) -> int:
         send_text(socket, target, args.text)
         if args.submit:
             send_profile_action(socket, target, profile, "submit")
-    if not args.quiet:
+    receipt = {
+        "mark": mark_id,
+        "profile": profile_name,
+        "session": args.session,
+        "submitted": bool(args.submit),
+        "target": target,
+    }
+    if args.json:
+        print(json.dumps(receipt, sort_keys=True))
+    elif not args.quiet:
         suffix = f" mark={mark_id}" if mark_id else ""
         print(f"prompt sent: target={target} profile={profile_name} submitted={'yes' if args.submit else 'no'}{suffix}")
     return 0
@@ -2178,15 +2264,12 @@ def doctor_cmd(args: argparse.Namespace) -> int:
     live_names = view["live"]
     missing_live = view["dead_but_registered"]
     unregistered_live = view["unregistered_live"]
-    probe = try_tmux(socket, [
-        "list-sessions",
-        "-F",
-        "#{session_name}\t#{session_windows}\t#{session_attached}\t#{session_created}\t#{session_id}",
-    ])
+    # `compute_session_view` already ran `list-sessions` and captured any
+    # failure in `view["tmux_error"]`. No need for a third probe.
+    probe = {"ok": view["tmux_error"] is None, "error": view["tmux_error"]}
     issues: list[str] = []
     if not probe["ok"]:
-        message = (probe["stdout"] + probe["stderr"]).strip()
-        issues.append(classify_tmux_failure(socket, message))
+        issues.append(classify_tmux_failure(socket, probe["error"] or ""))
 
     if registry_error:
         issues.append("registry-unreadable")
@@ -2236,7 +2319,7 @@ def doctor_cmd(args: argparse.Namespace) -> int:
     if probe["ok"]:
         print(f"Live sessions: {', '.join(live_names) if live_names else '(none)'}")
     else:
-        message = (probe["stdout"] + probe["stderr"]).strip()
+        message = probe["error"] or ""
         print(f"tmux probe failed: {classify_tmux_failure(socket, message)}")
         if message:
             print(f"tmux error: {message}")
@@ -2262,6 +2345,7 @@ def exec_tmux_client(socket: Path, args: list[str]) -> None:
 
 
 def attach_project_tmux(root: Path, socket: Path, session: str | None = None) -> int:
+    reject_picker_target(session, command="attach")
     registry = load_registry(registry_path(root))
     view = compute_session_view(socket, registry)
     live = view["live"]
@@ -2273,7 +2357,7 @@ def attach_project_tmux(root: Path, socket: Path, session: str | None = None) ->
             else:
                 print(f"Session not found: {session}")
             if live:
-                print(f"Open picker: {user_command(root, 'attach')}")
+                print(f"Attach picker: {user_command(root, 'attach')}")
             if view["dead_but_registered"]:
                 print(f"Dead but registered: {', '.join(view['dead_but_registered'])}")
             print(f"List sessions: {user_command(root, 'list')}")
@@ -2298,13 +2382,27 @@ def attach_project_tmux(root: Path, socket: Path, session: str | None = None) ->
         if target_session:
             run_tmux_in_current_client(socket, ["switch-client", "-t", target_session])
         else:
-            run_tmux_in_current_client(socket, ["choose-tree", "-Zs"])
+            ensure_picker_session(socket)
+            run_tmux_in_current_client(socket, [
+                "switch-client", "-t", PICKER_SESSION, ";",
+                *PICKER_SESSION_TREE_ARGS,
+            ])
         return 0
 
     if target_session:
         exec_tmux_client(socket, ["attach-session", "-t", target_session])
     else:
-        exec_tmux_client(socket, ["attach-session", "-t", live[0], ";", "choose-tree", "-Zs"])
+        # No target → land in the lobby (a benign host pane), then overlay
+        # the picker. Dismissing the picker leaves the user in the lobby
+        # rather than in a real working agent's pane.
+        if not sys.stdout.isatty():
+            print("attach picker requires a terminal; for headless inspection use list/status/report", file=sys.stderr)
+            return 1
+        ensure_picker_session(socket)
+        exec_tmux_client(socket, [
+            "attach-session", "-t", PICKER_SESSION, ";",
+            *PICKER_SESSION_TREE_ARGS,
+        ])
     return 0
 
 
@@ -2315,14 +2413,16 @@ def attach_cmd(args: argparse.Namespace) -> int:
 
 
 def interrupt_cmd(args: argparse.Namespace) -> int:
+    target = args.pane or args.session
+    reject_picker_target(target, command="interrupt")
     root = project_root(Path(args.cwd) if args.cwd else None)
     socket = socket_path(root, args.socket)
-    target = args.pane or args.session
     run_tmux(socket, ["send-keys", "-t", target, "C-c"])
     return 0
 
 
 def kill_cmd(args: argparse.Namespace) -> int:
+    reject_picker_target(args.session, command="kill")
     root = project_root(Path(args.cwd) if args.cwd else None)
     socket = socket_path(root, args.socket)
     run_tmux(socket, ["kill-session", "-t", args.session])
@@ -2332,9 +2432,11 @@ def kill_cmd(args: argparse.Namespace) -> int:
 
 
 def split_cmd(args: argparse.Namespace) -> int:
+    target = args.session if args.target is None else args.target
+    reject_picker_target(args.session, command="split")
+    reject_picker_target(args.target, command="split")
     root = project_root(Path(args.cwd) if args.cwd else None)
     socket = socket_path(root, args.socket)
-    target = args.session if args.target is None else args.target
     cmd = ["split-window", "-t", target]
     if args.horizontal:
         cmd.append("-h")
@@ -2349,6 +2451,8 @@ def split_cmd(args: argparse.Namespace) -> int:
 
 
 def move_window_cmd(args: argparse.Namespace) -> int:
+    reject_picker_target(args.source, command="move-window")
+    reject_picker_target(args.target, command="move-window")
     root = project_root(Path(args.cwd) if args.cwd else None)
     socket = socket_path(root, args.socket)
     run_tmux(socket, ["move-window", "-s", args.source, "-t", args.target])
@@ -2356,6 +2460,8 @@ def move_window_cmd(args: argparse.Namespace) -> int:
 
 
 def join_pane_cmd(args: argparse.Namespace) -> int:
+    reject_picker_target(args.source, command="join-pane")
+    reject_picker_target(args.target, command="join-pane")
     root = project_root(Path(args.cwd) if args.cwd else None)
     socket = socket_path(root, args.socket)
     cmd = ["join-pane", "-s", args.source, "-t", args.target]
@@ -2524,6 +2630,7 @@ def parser() -> argparse.ArgumentParser:
     prompt.add_argument("--no-mark", dest="mark", action="store_false", help="Do not create a transcript mark before sending")
     prompt.add_argument("--mark-label", help="Optional label for the pre-send mark")
     prompt.add_argument("--quiet", action="store_true")
+    prompt.add_argument("--json", action="store_true", help="Emit a machine-readable receipt")
     prompt.set_defaults(func=prompt_cmd, submit=True, mark=True)
 
     mark = command("mark", help="Create a transcript mark for a session or pane")
@@ -2713,6 +2820,7 @@ def parser() -> argparse.ArgumentParser:
 
 def main() -> int:
     args = parser().parse_args()
+    require_tmux_version()
     if getattr(args, "cmd", None) == "launch":
         try:
             return launch(args)

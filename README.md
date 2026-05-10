@@ -8,6 +8,10 @@ tmux still owns the live terminal state. `agent-tmux` is the control and reporti
 
 ## Install
 
+Requires tmux ≥ 3.2 (the attach-picker uses `choose-tree -f` filtering).
+The session name `__agent_tmux_picker__` is reserved for an internal
+attach-picker lobby and cannot be used for user sessions.
+
 Clone the repo:
 
 ```bash

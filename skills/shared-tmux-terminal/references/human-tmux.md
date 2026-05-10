@@ -10,7 +10,9 @@ Prefer the no-arg project wrapper command shown by `report`:
 .agent/tmux attach
 ```
 
-With multiple live sessions this opens tmux's native session picker. With one live session it attaches directly.
+With one live session it attaches directly. With multiple live sessions it lands you in a benign internal session named `__agent_tmux_picker__` (the "lobby") and overlays the picker on top, so dismissing the picker leaves you in the lobby instead of in a working agent's pane. The lobby is hidden from `list`, `report`, and the picker itself; the name is reserved.
+
+The `agent-tmux attach` command uses the lobby even when run from inside the project tmux server. The profile keybinding (`Prefix S`) intentionally keeps the faster in-place overlay, so dismissing that picker returns to the pane where the shortcut was pressed.
 
 Direct attach still works when you know the session:
 
@@ -35,7 +37,7 @@ agent-tmux tmux-profile show
 agent-tmux tmux-profile apply
 ```
 
-The profile is applied automatically by `launch` and `attach`. It enables mouse support, larger scrollback, pane labels, a compact status line, and navigation bindings. It does not write `~/.tmux.conf`.
+The profile is applied automatically by `launch` and `attach`. It enables mouse support, larger scrollback, pane labels, a compact status line, navigation bindings, and turns off `automatic-rename` so window names stay stable instead of inheriting the foreground process's title (e.g. Claude Code's version string). It does not write `~/.tmux.conf`.
 
 ## Navigation
 
