@@ -695,6 +695,7 @@ def claude_hook_settings(root: Path, session: str) -> dict[str, Any]:
             "StopFailure": [{"hooks": [hook]}],
             "Notification": [{"hooks": [hook]}],
             "PermissionRequest": [{"hooks": [hook]}],
+            "UserPromptSubmit": [{"hooks": [hook]}],
         }
     }
 
@@ -2012,6 +2013,28 @@ def wait_cmd(args: argparse.Namespace) -> int:
         time.sleep(args.interval)
 
 
+def claude_prompt_submit_warning(root: Path, registry: dict[str, Any], session: str, mark_id: str) -> str | None:
+    if list_events(root, session=session, kind="prompt_submitted"):
+        return None
+
+    session_entry = (registry.get("sessions") or {}).get(session) or {}
+    events_info = session_entry.get("events") or {}
+    if events_info.get("status") != "native-hook" or not events_info.get("run_wired"):
+        return None
+
+    since = str(resolve_mark(root, mark_id).get("created_at") or "")
+    deadline = time.monotonic() + 3.0
+    while time.monotonic() < deadline:
+        if list_events(root, session=session, kind="prompt_submitted", since_created_at=since):
+            return None
+        time.sleep(0.1)
+
+    return (
+        f"submit unconfirmed (mark={mark_id}); "
+        f"inspect with: agent-tmux events list --since-mark {mark_id}"
+    )
+
+
 def prompt_cmd(args: argparse.Namespace) -> int:
     root = project_root(Path(args.cwd) if args.cwd else None)
     socket = socket_path(root, args.socket)
@@ -2020,6 +2043,7 @@ def prompt_cmd(args: argparse.Namespace) -> int:
     target = target_for_args(socket, args.session, args.pane)
     agent_name = args.agent or infer_session_agent(registry, args.session)
     profile_name, profile = resolve_profile(agent_name)
+    session_key = session_name_from_target(args.session, target)
     mark_id = None
     with file_lock(prompt_lock_path(root, target)):
         if args.mark:
@@ -2032,10 +2056,13 @@ def prompt_cmd(args: argparse.Namespace) -> int:
                 label=args.mark_label or "prompt",
             )
             if changed:
-                save_registry_session(registry_file, registry, session_name_from_target(args.session, target))
+                save_registry_session(registry_file, registry, session_key)
         send_text(socket, target, args.text)
         if args.submit:
             send_profile_action(socket, target, profile, "submit")
+    warning: str | None = None
+    if args.submit and mark_id and profile_name == "claude":
+        warning = claude_prompt_submit_warning(root, registry, session_key, mark_id)
     receipt = {
         "mark": mark_id,
         "profile": profile_name,
@@ -2043,11 +2070,15 @@ def prompt_cmd(args: argparse.Namespace) -> int:
         "submitted": bool(args.submit),
         "target": target,
     }
+    if warning:
+        receipt["warning"] = warning
     if args.json:
         print(json.dumps(receipt, sort_keys=True))
     elif not args.quiet:
         suffix = f" mark={mark_id}" if mark_id else ""
         print(f"prompt sent: target={target} profile={profile_name} submitted={'yes' if args.submit else 'no'}{suffix}")
+        if warning:
+            print(f"warning: {warning}")
     return 0
 
 
