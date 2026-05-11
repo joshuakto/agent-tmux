@@ -9,6 +9,7 @@ import fcntl
 import json
 import os
 import re
+import select
 import shlex
 import shutil
 import subprocess
@@ -699,31 +700,169 @@ def claude_hook_settings(root: Path, session: str) -> dict[str, Any]:
 
 
 CODEX_HOOK_EVENTS = ["Stop", "PermissionRequest"]
+CODEX_TRUST_EVENT_NAMES = {"stop", "permissionRequest"}
+CODEX_TRUST_SOURCE = "sessionFlags"
 
 
 def toml_string(value: str) -> str:
     return json.dumps(value)
 
 
-def codex_hooks_toml(root: Path, session: str) -> str:
+def codex_hooks_toml(root: Path, session: str, trust_state: dict[str, str] | None = None) -> str:
     command = hook_ingest_command(root, "codex", session, quiet=True)
     hook = f'{{type="command", command={toml_string(command)}}}'
     group = f"{{hooks=[{hook}]}}"
     entries = [f"{event}=[{group}]" for event in CODEX_HOOK_EVENTS]
+    if trust_state:
+        state_entries = [
+            f"{toml_string(key)}={{trusted_hash={toml_string(trusted_hash)}}}"
+            for key, trusted_hash in sorted(trust_state.items())
+        ]
+        entries.append("state={" + ",".join(state_entries) + "}")
     return "hooks={" + ",".join(entries) + "}"
 
 
-def write_hook_settings(root: Path, agent: str, session: str) -> tuple[Path | None, str, str | None, dict[str, Any]]:
+def codex_app_server_hooks_list(
+    root: Path,
+    codex_program: str,
+    config_value: str,
+    *,
+    timeout: float = 5.0,
+) -> dict[str, Any]:
+    process: subprocess.Popen[str] | None = None
+    try:
+        process = subprocess.Popen(
+            [codex_program, "app-server", "-c", config_value],
+            cwd=str(root),
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            text=True,
+            bufsize=1,
+        )
+        assert process.stdin is not None
+        assert process.stdout is not None
+        requests = [
+            {
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "initialize",
+                "params": {"clientInfo": {"name": "agent-tmux", "version": "0"}},
+            },
+            {"jsonrpc": "2.0", "id": 2, "method": "hooks/list", "params": {}},
+        ]
+        for request in requests:
+            process.stdin.write(json.dumps(request) + "\n")
+        process.stdin.flush()
+
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            if process.poll() is not None:
+                break
+            remaining = max(0.0, deadline - time.monotonic())
+            readable, _, _ = select.select([process.stdout], [], [], min(0.25, remaining))
+            if not readable:
+                continue
+            line = process.stdout.readline()
+            if not line:
+                continue
+            message = json.loads(line)
+            if message.get("id") == 2:
+                if message.get("error"):
+                    raise RuntimeError(str(message["error"]))
+                return message
+        raise RuntimeError("timed out waiting for codex hooks/list")
+    except (FileNotFoundError, OSError, subprocess.SubprocessError, json.JSONDecodeError) as exc:
+        raise RuntimeError(str(exc)) from exc
+    finally:
+        if process is not None and process.poll() is None:
+            process.terminate()
+            try:
+                process.wait(timeout=2)
+            except subprocess.TimeoutExpired:
+                process.kill()
+
+
+def codex_session_flag_hooks(response: dict[str, Any]) -> list[dict[str, Any]]:
+    hooks: list[dict[str, Any]] = []
+    for group in ((response.get("result") or {}).get("data") or []):
+        if not isinstance(group, dict):
+            continue
+        for hook in group.get("hooks") or []:
+            if not isinstance(hook, dict):
+                continue
+            if hook.get("source") == CODEX_TRUST_SOURCE and hook.get("eventName") in CODEX_TRUST_EVENT_NAMES:
+                hooks.append(hook)
+    return hooks
+
+
+def trusted_codex_hooks_toml(root: Path, session: str, codex_program: str) -> tuple[str, dict[str, Any]]:
+    initial_value = codex_hooks_toml(root, session)
+    first_response = codex_app_server_hooks_list(root, codex_program, initial_value)
+    initial_hooks = codex_session_flag_hooks(first_response)
+    expected_events = set(CODEX_TRUST_EVENT_NAMES)
+    found_events = {str(hook.get("eventName")) for hook in initial_hooks}
+    missing_events = sorted(expected_events - found_events)
+    trust_state = {
+        str(hook["key"]): str(hook["currentHash"])
+        for hook in initial_hooks
+        if hook.get("key") and hook.get("currentHash")
+    }
+    if missing_events or len(trust_state) != len(expected_events):
+        raise RuntimeError(
+            "codex hooks/list did not expose all agent-tmux session hooks "
+            f"(missing: {', '.join(missing_events) or 'unknown'})"
+        )
+
+    trusted_value = codex_hooks_toml(root, session, trust_state)
+    second_response = codex_app_server_hooks_list(root, codex_program, trusted_value)
+    verified_hooks = codex_session_flag_hooks(second_response)
+    untrusted = [
+        f"{hook.get('eventName')}:{hook.get('trustStatus')}"
+        for hook in verified_hooks
+        if hook.get("trustStatus") != "trusted"
+    ]
+    verified_events = {str(hook.get("eventName")) for hook in verified_hooks if hook.get("trustStatus") == "trusted"}
+    missing_verified = sorted(expected_events - verified_events)
+    if untrusted or missing_verified:
+        details = ", ".join(untrusted + [f"{event}:missing" for event in missing_verified])
+        raise RuntimeError(f"codex session hooks were not trusted after verification ({details})")
+
+    return trusted_value, {
+        "trust": "inline-session-state",
+        "trusted_hooks": sorted(verified_events),
+        "trusted_hook_count": len(verified_events),
+    }
+
+
+def write_hook_settings(
+    root: Path,
+    agent: str,
+    session: str,
+    *,
+    codex_program: str = "codex",
+) -> tuple[Path | None, str, str | None, dict[str, Any]]:
     profile_name, _profile = resolve_profile(agent)
     if profile_name == "claude":
         settings_path = hooks_dir(root, session) / "claude-settings.json"
         write_json_atomic(settings_path, claude_hook_settings(root, session))
         return settings_path, "native-hook", None, {"mode": "settings-file"}
     if profile_name == "codex":
-        config_value = codex_hooks_toml(root, session)
+        hook_config: dict[str, Any] = {"mode": "wrapper-cli-config", "config_path": str(hooks_dir(root, session) / "codex-hooks.toml")}
+        status = "native-hook"
+        warning = None
+        try:
+            config_value, trust_info = trusted_codex_hooks_toml(root, session, codex_program)
+            hook_config.update(trust_info)
+        except RuntimeError as exc:
+            config_value = codex_hooks_toml(root, session)
+            hook_config["trust"] = "unverified"
+            hook_config["trust_error"] = str(exc)
+            status = "native-hook-unverified"
+            warning = f"Codex hook trust could not be verified; native events may require Codex hook approval ({exc})"
         config_path = hooks_dir(root, session) / "codex-hooks.toml"
         atomic_write_text(config_path, config_value + "\n")
-        return config_path, "native-hook", None, {"mode": "wrapper-cli-config", "config_path": str(config_path)}
+        return config_path, status, warning, hook_config
     return None, "unsupported-agent", f"native hook wiring is not implemented for agent profile: {profile_name}", {}
 
 
@@ -1287,6 +1426,20 @@ def print_report(root: Path, socket: Path, registry: dict[str, Any], *, lines: i
             print(f"  cwd: {cwd}")
         print(f"  attach: {user_command(root, f'attach {name}')}")
         print(f"  tmux attach: tmux -S {socket} attach -t {name}")
+        events_info = reg.get("events") or {}
+        if events_info.get("trust"):
+            trust_suffix = ""
+            if events_info.get("trusted_hooks"):
+                trust_suffix = f" ({', '.join(events_info['trusted_hooks'])})"
+            print(f"  codex hook trust: {events_info['trust']}{trust_suffix}")
+        readiness = events_info.get("codex_readiness") or {}
+        if readiness:
+            state = readiness.get("state", "unknown")
+            print(f"  codex hook readiness: {state}")
+            if state == "trusted-inline-session-state":
+                hooks = readiness.get("trusted_hooks") or []
+                if hooks:
+                    print(f"    trusted hooks: {', '.join(hooks)}")
         print("  panes:")
         for pane in panes:
             marker = "*" if pane["active"] else " "
@@ -1379,12 +1532,24 @@ def launch(args: argparse.Namespace) -> int:
             events_info = {"requested": True, "status": "missing-agent", "warning": "pass --agent to enable native hook wiring"}
             hook_warning = events_info["warning"]
         else:
-            settings_path, status, warning, hook_config = write_hook_settings(root, args.agent, session)
-            events_info = {"requested": True, "status": status, "agent": resolve_profile(args.agent)[0]}
+            profile_name = resolve_profile(args.agent)[0]
+            codex_program = "codex"
+            if profile_name == "codex":
+                run_tokens, _run_parse_error = parse_run_for_wiring(args.run, "codex")
+                if run_tokens:
+                    codex_program = run_tokens[0]
+            settings_path, status, warning, hook_config = write_hook_settings(
+                root,
+                args.agent,
+                session,
+                codex_program=codex_program,
+            )
+            events_info = {"requested": True, "status": status, "agent": profile_name}
             if settings_path is not None:
                 events_info["settings_path"] = str(settings_path)
-            if hook_config.get("mode"):
-                events_info["mode"] = hook_config["mode"]
+            for key in ("mode", "trust", "trusted_hooks", "trusted_hook_count", "trust_error"):
+                if key in hook_config:
+                    events_info[key] = hook_config[key]
             if warning:
                 events_info["warning"] = warning
                 hook_warning = warning
@@ -1437,6 +1602,20 @@ def launch(args: argparse.Namespace) -> int:
         send_text(socket, target, effective_run)
         run_tmux(socket, ["send-keys", "-t", target, "Enter"])
 
+    if (
+        effective_run
+        and events_info
+        and events_info.get("agent") == "codex"
+        and events_info.get("run_wired")
+        and events_info.get("status") == "native-hook"
+        and events_info.get("trust") == "inline-session-state"
+    ):
+        events_info["codex_readiness"] = {
+            "state": "trusted-inline-session-state",
+            "trusted_hooks": events_info.get("trusted_hooks", []),
+            "detected_at": now_iso(),
+        }
+
     update_registry_entry(
         registry,
         root,
@@ -1479,6 +1658,24 @@ def launch(args: argparse.Namespace) -> int:
         if events_info.get("settings_path"):
             label = "hook settings" if events_info.get("mode") == "settings-file" else "hook config"
             print(f"{label}: {events_info['settings_path']}")
+        if events_info.get("trust"):
+            trust = events_info["trust"]
+            suffix = ""
+            if events_info.get("trusted_hooks"):
+                suffix = f" ({', '.join(events_info['trusted_hooks'])})"
+            print(f"codex hook trust: {trust}{suffix}")
+            if events_info.get("trust_error"):
+                print(f"  trust error: {events_info['trust_error']}")
+        readiness = events_info.get("codex_readiness")
+        if readiness:
+            state = readiness.get("state", "unknown")
+            elapsed = readiness.get("elapsed_seconds")
+            elapsed_str = f" after {elapsed}s" if elapsed is not None else ""
+            print(f"codex hook readiness: {state}{elapsed_str}")
+            if state == "trusted-inline-session-state":
+                hooks = readiness.get("trusted_hooks") or []
+                if hooks:
+                    print(f"  trusted hooks: {', '.join(hooks)}")
         if hook_warning:
             print(f"hook warning: {hook_warning}")
     print(f"windows: {len({pane['window_index'] for pane in panes})}  panes: {len(panes)}")
@@ -1592,6 +1789,22 @@ def status_cmd(args: argparse.Namespace) -> int:
     print(f"Attach: {user_command(root, f'attach {session}')}")
     print(f"Attach picker: {user_command(root, 'attach')}")
     print(f"Tmux attach: tmux -S {socket} attach -t {session}")
+    events_info = reg.get("events") or {}
+    if events_info.get("trust"):
+        trust_suffix = ""
+        if events_info.get("trusted_hooks"):
+            trust_suffix = f" ({', '.join(events_info['trusted_hooks'])})"
+        print(f"Codex hook trust: {events_info['trust']}{trust_suffix}")
+        if events_info.get("trust_error"):
+            print(f"  Trust error: {events_info['trust_error']}")
+    readiness = events_info.get("codex_readiness") or {}
+    if readiness:
+        state = readiness.get("state", "unknown")
+        print(f"Codex hook readiness: {state}")
+        if state == "trusted-inline-session-state":
+            hooks = readiness.get("trusted_hooks") or []
+            if hooks:
+                print(f"  Trusted hooks: {', '.join(hooks)}")
     print(f"Windows: {sess['windows'] if sess else len({p['window_index'] for p in panes})}")
     for pane in panes:
         marker = "*" if pane["active"] else " "
@@ -2172,6 +2385,29 @@ def hooks_cmd(args: argparse.Namespace) -> int:
             path = Path(events_info["settings_path"])
             label = "Settings" if events_info.get("mode") == "settings-file" else "Config"
             print(f"{label}: {path} ({'exists' if path.exists() else 'missing'})")
+        if events_info.get("trust"):
+            trust_suffix = ""
+            if events_info.get("trusted_hooks"):
+                trust_suffix = f" ({', '.join(events_info['trusted_hooks'])})"
+            print(f"Codex hook trust: {events_info['trust']}{trust_suffix}")
+            if events_info.get("trust_error"):
+                print(f"  Trust error: {events_info['trust_error']}")
+        readiness = events_info.get("codex_readiness")
+        if readiness:
+            state = readiness.get("state", "unknown")
+            elapsed = readiness.get("elapsed_seconds")
+            detected_at = readiness.get("detected_at")
+            suffix_parts = []
+            if elapsed is not None:
+                suffix_parts.append(f"checked {elapsed}s")
+            if detected_at:
+                suffix_parts.append(f"at {detected_at}")
+            suffix = f" ({'; '.join(suffix_parts)})" if suffix_parts else ""
+            print(f"Codex hook readiness: {state}{suffix}")
+            if state == "trusted-inline-session-state":
+                hooks = readiness.get("trusted_hooks") or []
+                if hooks:
+                    print(f"  Trusted hooks: {', '.join(hooks)}")
         if events_info.get("warning"):
             print(f"Warning: {events_info['warning']}")
         if events_info.get("run_warning"):
