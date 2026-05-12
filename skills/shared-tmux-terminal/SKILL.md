@@ -19,32 +19,59 @@ Use this skill when work needs a live terminal shared by an agent and a human.
 
 ## Golden Path
 
-Use the project wrapper when present; otherwise replace `.agent/tmux` with `agent-tmux`.
+Supervising a worker terminal-agent is a four-step loop. Use `agent-tmux` (or `.agent/tmux` if the wrapper is installed).
+
+**1. Launch the worker.** Name the session, point `--run` at the agent CLI binary, and ask for native event wiring. `--agent` is inferred from the `--run` basename (`claude`, `codex`, `opencode`, `gemini`).
 
 ```bash
-.agent/tmux launch --session <name> --events --require-events --purpose <purpose> --run "<binary> ..." --log
-.agent/tmux report
-.agent/tmux prompt <session> "<instruction; when finished or blocked, run: .agent/tmux board post --topic <topic> \"concise status memo\">"
-.agent/tmux events wait --session <session> --since-mark <mark-id> --ack --json --timeout 1800
-.agent/tmux board read <message-id>
+agent-tmux launch --session reviewer --events --require-events --run "claude --name reviewer" --log
 ```
 
-`prompt` infers the agent profile from the session registry and prints a transcript mark in its receipt. `events wait` defaults to the manager attention set (`board_post,needs_input,permission_request,agent_stop,hook_error`); pass `--kind all` to widen.
+`--require-events` fails launch if hook wiring or binary resolution cannot be verified — better to fail fast than supervise blind. The launch report tells you what got wired. `--require-events` only succeeds for CLIs with native hook support; see `references/wiring-internals.md` for the matrix.
 
-Recognized `--run` binaries: first-class native events for Claude Code (`claude --name <name>`) and Codex CLI (`codex`); profile-aware prompt keys for opencode CLI (`opencode`) and Gemini CLI (`gemini`). Pass `--agent` only to override or for unknown binaries. The launch report tells you what got wired.
+**2. Send the task and capture the mark.** `prompt --json` types the message, submits it, and prints a JSON receipt. Capture the mark — it is your event cursor for step 3.
+
+The task text MUST end with the report-back instruction so the worker knows how to signal completion. Use this canonical phrasing verbatim (replace `<topic>` and the memo body):
+
+> `When done or blocked, run: agent-tmux board post --topic <topic> "<concise status memo>"`
+
+```bash
+TASK='Read README.md and write a 5-bullet summary. When done or blocked, run: agent-tmux board post --topic readme-summary "<5 bullets>"'
+MARK=$(agent-tmux prompt reviewer "$TASK" --json | jq -r .mark)
+```
+
+Receipt shape: `{"mark":"m_...","profile":"...","session":"...","submitted":true,"target":"..."}`. The board is how the worker tells you it's done; the transcript is not task truth.
+
+**3. Wait for an attention event.** `events wait --json` blocks until a `board_post`, `needs_input`, `permission_request`, `agent_stop`, or `hook_error` event lands after `MARK`, then prints one event and exits.
+
+```bash
+EVENT=$(agent-tmux events wait --session reviewer --since-mark "$MARK" --ack --json --timeout 1800)
+KIND=$(echo "$EVENT" | jq -r .kind)
+MSG=$(echo "$EVENT"  | jq -r '.message_id // empty')
+```
+
+Event JSON has `id`, `kind`, `session`, `agent`, `source`, `summary`, `read_command` (a ready-to-run command string), and event-specific fields (`message_id`/`topic`/`path` for board posts). Branch on `$KIND`:
+
+- `board_post` → step 4 with `$MSG`.
+- `needs_input` / `permission_request` → `agent-tmux read reviewer --since-mark "$MARK"` to inspect, then decide.
+- `agent_stop` without a memo → worker ended silently; recover via `read` or `attach`.
+- `hook_error` → see `references/hooks.md`.
+
+**4. Read the memo.**
+
+```bash
+agent-tmux board read "$MSG"
+```
+
+Treat the memo as a report, not as task truth — verify artifacts/tests/commits as needed.
 
 ## Decision Rules
 
 - Continuing existing shared work: run `list` first; reuse only when there is an obvious matching live session.
-- Need to start shared work: `launch --log`, then `report`.
-- Need to send a user message to a terminal-agent CLI: use `prompt`, not `raw send`.
-- Need the response to your last worker prompt: use `events wait --since-mark <mark-id>`, then `board read`.
-- Need raw terminal evidence: use `read --since-mark <mark-id>`, `wait --since-mark <mark-id>`, or `search`.
-- Session seems missing or socket access fails: `list`/`status` already flag `Dead but registered` for sessions killed externally. Run `doctor` for full diagnostics; do not conclude absence from a failed probe.
+- Need raw terminal evidence (not an event): use `read --since-mark <mark-id>`, `wait --since-mark <mark-id>`, or `search`.
+- Session seems missing or socket access fails: `list`/`status` flag `Dead but registered` for sessions killed externally. Run `doctor` for full diagnostics; do not conclude absence from a failed probe.
 - Human wants to inspect/interfere: report the no-arg `attach` command; it opens the live-session picker.
 - Need proof of completion: inspect artifacts/tests/branches, not logs or marks.
-- Supervising a worker agent: use `--require-events`, wait for attention events since the prompt mark, then branch by event kind.
-- Need cleanup: use `kill <session>` for one disposable session, or `kill <session>:<window-index>` for one window. `kill <session>` refuses attached or multi-window sessions unless forced.
 
 ## Load References Only When Needed
 

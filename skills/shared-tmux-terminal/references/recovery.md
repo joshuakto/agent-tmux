@@ -90,3 +90,7 @@ agent-tmux move-window <source-window> <target-session>:
 ```
 
 After layout changes, run `report` and tell the human the attach command.
+
+## Cleanup
+
+Use `kill <session>` to dispose of a single-purpose session you no longer need, or `kill <session>:<window-index>` to close one window of a multi-window session. `kill <session>` refuses attached or multi-window sessions unless `--force` is passed — that guard exists so a confused agent does not destroy work the human is watching.

@@ -47,11 +47,11 @@ agent-tmux raw keys reviewer Tab Enter
 Built-in profiles expose the same stable actions:
 
 ```text
-submit: profile-specific submit key sequence
+submit: Enter
 interrupt: C-c
 eof: C-d
 escape: Escape
 clear: C-l
 ```
 
-Profiles are one place to document and change vendor-specific interaction behavior later. Transcript readability is shared across agents — `read --since-mark` and `wait --from-now` normalize common terminal control sequences. For the rules on adding a new profile, see `references/wiring-internals.md`.
+The codex profile additionally applies a 300ms post-submit delay (`submit_delay_seconds: 0.3`) to give its TUI time to register the keypress. Profiles are one place to document and change vendor-specific interaction behavior later. Transcript readability is shared across agents — `read --since-mark` and `wait --from-now` normalize common terminal control sequences. For the rules on adding a new profile, see `references/wiring-internals.md`.
