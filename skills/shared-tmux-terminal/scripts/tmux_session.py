@@ -67,8 +67,8 @@ AGENT_PROFILES: dict[str, dict[str, Any]] = {
         },
         "notes": "Gemini CLI profile. Use prompt for user-message style input.",
     },
-    "cursor": {
-        "aliases": ["cursor-agent"],
+    "opencode": {
+        "aliases": ["opencode-cli"],
         "actions": {
             "submit": ["Enter"],
             "interrupt": ["C-c"],
@@ -76,7 +76,7 @@ AGENT_PROFILES: dict[str, dict[str, Any]] = {
             "escape": ["Escape"],
             "clear": ["C-l"],
         },
-        "notes": "Cursor CLI profile. Use prompt for user-message style input.",
+        "notes": "opencode CLI profile. Use prompt for user-message style input.",
     },
 }
 
@@ -898,7 +898,7 @@ def _binary_resolvable(token: str) -> tuple[bool, str | None]:
 RUN_BINARY_TO_PROFILE: dict[str, str] = {
     "claude": "claude",
     "codex": "codex",
-    "cursor-agent": "cursor",
+    "opencode": "opencode",
     "gemini": "gemini",
 }
 
@@ -2912,7 +2912,7 @@ def parser() -> argparse.ArgumentParser:
     launch_cmd.add_argument("--session", help="Session name to create or reuse")
     launch_cmd.add_argument("--purpose", help="Short purpose label stored in the registry")
     launch_cmd.add_argument("--run", help="Literal command to send after launch")
-    launch_cmd.add_argument("--agent", help="Agent profile for the launched process, e.g. claude, codex, cursor, gemini")
+    launch_cmd.add_argument("--agent", help="Agent profile for the launched process, e.g. claude, codex, opencode, gemini")
     launch_cmd.add_argument("--events", action="store_true", help="Enable native event hook wiring for supported agents")
     launch_cmd.add_argument("--require-events", action="store_true", help="Fail launch unless native event hook wiring is verified")
     launch_cmd.add_argument("--run-delay", type=float, default=0.5, help="Seconds to wait before sending --run to a newly started shell")
@@ -3020,7 +3020,7 @@ def parser() -> argparse.ArgumentParser:
     prompt.add_argument("session")
     prompt.add_argument("text")
     prompt.add_argument("--pane", help="Explicit pane target, e.g. session:0.0")
-    prompt.add_argument("--agent", help="Agent profile (claude, codex, cursor, gemini, generic). Inferred from the session registry if omitted.")
+    prompt.add_argument("--agent", help="Agent profile (claude, codex, opencode, gemini, generic). Inferred from the session registry if omitted.")
     prompt.add_argument("--no-submit", dest="submit", action="store_false", help="Paste text but do not submit")
     prompt.add_argument("--no-mark", dest="mark", action="store_false", help="Do not create a transcript mark before sending")
     prompt.add_argument("--mark-label", help="Optional label for the pre-send mark")
@@ -3038,7 +3038,7 @@ def parser() -> argparse.ArgumentParser:
     action.add_argument("session")
     action.add_argument("action", help="Profile action, e.g. submit, interrupt, eof, escape, clear")
     action.add_argument("--pane", help="Explicit pane target, e.g. session:0.0")
-    action.add_argument("--agent", help="Agent profile (claude, codex, cursor, gemini, generic). Inferred from the session registry if omitted.")
+    action.add_argument("--agent", help="Agent profile (claude, codex, opencode, gemini, generic). Inferred from the session registry if omitted.")
     action.add_argument("--quiet", action="store_true")
     action.set_defaults(func=action_cmd)
 

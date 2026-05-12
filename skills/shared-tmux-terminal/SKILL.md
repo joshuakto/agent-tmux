@@ -31,7 +31,7 @@ Use the project wrapper when present; otherwise replace `.agent/tmux` with `agen
 
 `prompt` infers the agent profile from the session registry and prints a transcript mark in its receipt. `events wait` defaults to the manager attention set (`board_post,needs_input,permission_request,agent_stop,hook_error`); pass `--kind all` to widen.
 
-Recognized `--run` binaries: first-class native events for Claude Code (`claude --name <name>`) and Codex CLI (`codex`); profile-aware prompt keys for Cursor CLI (`cursor-agent`) and Gemini CLI (`gemini`). Pass `--agent` only to override or for unknown binaries. The launch report tells you what got wired.
+Recognized `--run` binaries: first-class native events for Claude Code (`claude --name <name>`) and Codex CLI (`codex`); profile-aware prompt keys for opencode CLI (`opencode`) and Gemini CLI (`gemini`). Pass `--agent` only to override or for unknown binaries. The launch report tells you what got wired.
 
 ## Decision Rules
 

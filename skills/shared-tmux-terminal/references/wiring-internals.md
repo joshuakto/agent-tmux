@@ -10,7 +10,7 @@ Implementation details for the native-hook wiring per vendor. Read this only whe
 | --- | --- | --- |
 | `claude` | claude | session-local `--settings <file>` |
 | `codex` | codex | session-local wrapper exec'ing `codex -c <inline-toml>` |
-| `cursor-agent` | cursor | profile-aware keys only — no native hooks yet |
+| `opencode` | opencode | profile-aware keys only — no native hooks yet |
 | `gemini` | gemini | profile-aware keys only — no native hooks yet |
 
 To add another binary, add a row to `RUN_BINARY_TO_PROFILE` in `tmux_session.py` and follow the "Adding a New Vendor" checklist below.
@@ -65,7 +65,7 @@ The wrapper exec's `codex -c "$(cat .agent/tmux.d/hooks/<session>/codex-hooks.to
 
 Codex requires hook trust. `agent-tmux` runs `codex app-server -c <config>` and exchanges `initialize` + `hooks/list` messages to capture each hook's `currentHash`, then re-launches Codex with `state={<key>={trusted_hash=...}}` injected so the session sees them as trusted. If trust verification fails, the launch falls back to an unverified config and surfaces `codex hook trust: unverified` in the report.
 
-## Cursor CLI and Gemini CLI
+## opencode CLI and Gemini CLI
 
 These profiles currently provide prompt/action key behavior only. They do not write hook files or rewrite the run command for native event ingestion. Use transcript reads and board memos as the reliable supervision path until the CLI exposes a stable event surface that maps cleanly to `agent_stop`, `needs_input`, and `permission_request`.
 

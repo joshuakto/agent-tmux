@@ -12,7 +12,7 @@ agent-tmux events wait --session reviewer --since-mark <mark-id> --ack --json --
 
 `--agent` is inferred from the `--run` binary basename when omitted; pass it explicitly to override. `--require-events` fails launch unless `agent-tmux` can verify session-local hook wiring *and* resolve the run-command binary (`shutil.which` for bare names, `is_file()` + executable check for absolute paths). Relative paths with separators (e.g. `./bin/claude`) are rejected.
 
-Common reliable `--run` values are `claude --name <name>` and `codex`. Cursor CLI (`cursor-agent`) and Gemini CLI (`gemini`) have profile-aware keys but no native hook wiring yet; use transcript and board checks for those sessions.
+Common reliable `--run` values are `claude --name <name>` and `codex`. opencode CLI (`opencode`) and Gemini CLI (`gemini`) have profile-aware keys but no native hook wiring yet; use transcript and board checks for those sessions.
 
 The launch report prints exactly what got wired (settings file, wrapper, trust state). Read that — do not assume from documentation.
 
