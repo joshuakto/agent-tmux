@@ -84,6 +84,7 @@ Use pane/window operations to preserve running processes while making them easie
 
 ```bash
 agent-tmux split <session> --horizontal
+agent-tmux kill <session>:<window-index>
 agent-tmux join-pane <source-pane> <target-pane>
 agent-tmux move-window <source-window> <target-session>:
 ```

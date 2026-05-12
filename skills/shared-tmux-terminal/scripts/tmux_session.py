@@ -53,6 +53,7 @@ AGENT_PROFILES: dict[str, dict[str, Any]] = {
             "escape": ["Escape"],
             "clear": ["C-l"],
         },
+        "submit_delay_seconds": 0.3,
         "notes": "Codex CLI profile. Use prompt for user-message style input.",
     },
     "gemini": {
@@ -65,6 +66,17 @@ AGENT_PROFILES: dict[str, dict[str, Any]] = {
             "clear": ["C-l"],
         },
         "notes": "Gemini CLI profile. Use prompt for user-message style input.",
+    },
+    "cursor": {
+        "aliases": ["cursor-agent"],
+        "actions": {
+            "submit": ["Enter"],
+            "interrupt": ["C-c"],
+            "eof": ["C-d"],
+            "escape": ["Escape"],
+            "clear": ["C-l"],
+        },
+        "notes": "Cursor CLI profile. Use prompt for user-message style input.",
     },
 }
 
@@ -883,6 +895,27 @@ def _binary_resolvable(token: str) -> tuple[bool, str | None]:
     return False, f"binary not found on PATH: {token}"
 
 
+RUN_BINARY_TO_PROFILE: dict[str, str] = {
+    "claude": "claude",
+    "codex": "codex",
+    "cursor-agent": "cursor",
+    "gemini": "gemini",
+}
+
+
+def infer_profile_from_run(run: str | None) -> str | None:
+    """Return the agent profile name implied by the run command's binary, or None."""
+    if not run:
+        return None
+    try:
+        tokens = shlex.split(run)
+    except ValueError:
+        return None
+    if not tokens:
+        return None
+    return RUN_BINARY_TO_PROFILE.get(Path(tokens[0]).name)
+
+
 def parse_run_for_wiring(run: str | None, expected_basename: str) -> tuple[list[str] | None, str | None]:
     if not run:
         return None, "no run command to wire"
@@ -987,6 +1020,48 @@ def list_sessions(socket: Path) -> list[dict[str, Any]]:
             }
         )
     return sessions
+
+
+def live_session(socket: Path, session: str) -> dict[str, Any] | None:
+    for sess in list_sessions(socket):
+        if sess["name"] == session:
+            return sess
+    return None
+
+
+def list_windows(socket: Path, session: str) -> list[dict[str, Any]]:
+    out = tmux_output(socket, [
+        "list-windows",
+        "-t",
+        session,
+        "-F",
+        "#{window_index}\t#{window_active}\t#{window_name}\t#{window_panes}",
+    ])
+    windows = []
+    for line in out.splitlines():
+        if not line.strip():
+            continue
+        try:
+            index, active, name, panes = line.split("\t", 3)
+        except ValueError:
+            continue
+        windows.append(
+            {
+                "index": int(index),
+                "active": active == "1",
+                "name": name,
+                "panes": int(panes),
+            }
+        )
+    return windows
+
+
+def window_count(socket: Path, session: str) -> int:
+    return len(list_windows(socket, session))
+
+
+def session_part(target: str) -> str:
+    return target.split(":", 1)[0]
 
 
 def compute_session_view(socket: Path, registry: dict[str, Any]) -> dict[str, Any]:
@@ -1526,11 +1601,17 @@ def launch(args: argparse.Namespace) -> int:
     effective_run = args.run
     events_info: dict[str, Any] | None = None
     hook_warning: str | None = None
+    agent_inferred_from_run = False
+    if not args.agent:
+        inferred = infer_profile_from_run(args.run)
+        if inferred:
+            args.agent = inferred
+            agent_inferred_from_run = True
     if args.require_events:
         args.events = True
     if args.events:
         if not args.agent:
-            events_info = {"requested": True, "status": "missing-agent", "warning": "pass --agent to enable native hook wiring"}
+            events_info = {"requested": True, "status": "missing-agent", "warning": "pass --agent or use a hook-capable --run binary (claude, codex) to enable native hook wiring"}
             hook_warning = events_info["warning"]
         else:
             profile_name = resolve_profile(args.agent)[0]
@@ -1546,9 +1627,17 @@ def launch(args: argparse.Namespace) -> int:
                 codex_program=codex_program,
             )
             events_info = {"requested": True, "status": status, "agent": profile_name}
+            if agent_inferred_from_run:
+                events_info["agent_inferred_from_run"] = True
             if settings_path is not None:
                 events_info["settings_path"] = str(settings_path)
-            for key in ("mode", "trust", "trusted_hooks", "trusted_hook_count", "trust_error"):
+            for key in (
+                "mode",
+                "trust",
+                "trusted_hooks",
+                "trusted_hook_count",
+                "trust_error",
+            ):
                 if key in hook_config:
                     events_info[key] = hook_config[key]
             if warning:
@@ -1654,6 +1743,8 @@ def launch(args: argparse.Namespace) -> int:
         print(f"log: {log_path}")
     if events_info is not None:
         print(f"events: {events_info.get('status')}")
+        if events_info.get("agent_inferred_from_run"):
+            print(f"agent: {events_info.get('agent')} (inferred from --run)")
         if events_info.get("mode"):
             print(f"event mode: {events_info['mode']}")
         if events_info.get("settings_path"):
@@ -1679,6 +1770,8 @@ def launch(args: argparse.Namespace) -> int:
                     print(f"  trusted hooks: {', '.join(hooks)}")
         if hook_warning:
             print(f"hook warning: {hook_warning}")
+    elif agent_inferred_from_run:
+        print(f"agent: {args.agent} (inferred from --run)")
     print(f"windows: {len({pane['window_index'] for pane in panes})}  panes: {len(panes)}")
     for pane in panes:
         marker = "*" if pane["active"] else " "
@@ -2059,6 +2152,9 @@ def prompt_cmd(args: argparse.Namespace) -> int:
                 save_registry_session(registry_file, registry, session_key)
         send_text(socket, target, args.text)
         if args.submit:
+            delay = float(profile.get("submit_delay_seconds", 0) or 0)
+            if delay > 0:
+                time.sleep(delay)
             send_profile_action(socket, target, profile, "submit")
     warning: str | None = None
     if args.submit and mark_id and profile_name == "claude":
@@ -2689,12 +2785,44 @@ def interrupt_cmd(args: argparse.Namespace) -> int:
 
 
 def kill_cmd(args: argparse.Namespace) -> int:
-    reject_picker_target(args.session, command="kill")
+    reject_picker_target(args.target, command="kill")
     root = project_root(Path(args.cwd) if args.cwd else None)
     socket = socket_path(root, args.socket)
-    run_tmux(socket, ["kill-session", "-t", args.session])
+    if ":" in args.target:
+        session = session_part(args.target)
+        if live_session(socket, session) is None:
+            raise SystemExit(f"session is not live: {session}")
+        count = window_count(socket, session)
+        if count <= 1 and not args.force:
+            raise SystemExit(
+                f"{args.target!r} is the last window in session {session!r}; killing it would kill the session. "
+                "Pass the session name instead if you mean to close the whole session, or use --force."
+            )
+        if count <= 1:
+            ensure_picker_session(socket)
+        run_tmux(socket, ["kill-window", "-t", args.target])
+        print(f"killed window: {args.target}")
+        return 0
+
+    sess = live_session(socket, args.target)
+    if sess is None:
+        raise SystemExit(f"session is not live: {args.target}")
+    if sess["attached"] and not args.force:
+        raise SystemExit(
+            f"session {args.target!r} is attached; use interrupt or attach to inspect, "
+            "or pass --force if you really mean to kill it"
+        )
+    if sess["windows"] > 1 and not args.force:
+        raise SystemExit(
+            f"session {args.target!r} has {sess['windows']} windows; pass a window target "
+            f"(for example {args.target}:<window-index>) or use --force."
+        )
+    if len(list_sessions(socket)) == 1:
+        ensure_picker_session(socket)
+    run_tmux(socket, ["kill-session", "-t", args.target])
     registry_file = registry_path(root)
-    remove_registry_session(registry_file, args.session)
+    remove_registry_session(registry_file, args.target)
+    print(f"killed session: {args.target}")
     return 0
 
 
@@ -2784,7 +2912,7 @@ def parser() -> argparse.ArgumentParser:
     launch_cmd.add_argument("--session", help="Session name to create or reuse")
     launch_cmd.add_argument("--purpose", help="Short purpose label stored in the registry")
     launch_cmd.add_argument("--run", help="Literal command to send after launch")
-    launch_cmd.add_argument("--agent", help="Agent profile for the launched process, e.g. claude, codex, gemini")
+    launch_cmd.add_argument("--agent", help="Agent profile for the launched process, e.g. claude, codex, cursor, gemini")
     launch_cmd.add_argument("--events", action="store_true", help="Enable native event hook wiring for supported agents")
     launch_cmd.add_argument("--require-events", action="store_true", help="Fail launch unless native event hook wiring is verified")
     launch_cmd.add_argument("--run-delay", type=float, default=0.5, help="Seconds to wait before sending --run to a newly started shell")
@@ -2820,8 +2948,8 @@ def parser() -> argparse.ArgumentParser:
 
     raw_send = raw_command(
         "send",
-        help="Advanced/raw: send literal text. Do not use for Claude/Codex/Gemini prompts; use prompt instead.",
-        description="Advanced/raw: send literal text to a pane. Do not use this for Claude/Codex/Gemini prompts; use prompt instead.",
+        help="Advanced/raw: send literal text. Do not use for terminal-agent prompts; use prompt instead.",
+        description="Advanced/raw: send literal text to a pane. Do not use this for terminal-agent prompts; use prompt instead.",
     )
     raw_send.add_argument("session")
     raw_send.add_argument("text")
@@ -2892,7 +3020,7 @@ def parser() -> argparse.ArgumentParser:
     prompt.add_argument("session")
     prompt.add_argument("text")
     prompt.add_argument("--pane", help="Explicit pane target, e.g. session:0.0")
-    prompt.add_argument("--agent", help="Agent profile (claude, codex, gemini, generic). Inferred from the session registry if omitted.")
+    prompt.add_argument("--agent", help="Agent profile (claude, codex, cursor, gemini, generic). Inferred from the session registry if omitted.")
     prompt.add_argument("--no-submit", dest="submit", action="store_false", help="Paste text but do not submit")
     prompt.add_argument("--no-mark", dest="mark", action="store_false", help="Do not create a transcript mark before sending")
     prompt.add_argument("--mark-label", help="Optional label for the pre-send mark")
@@ -2910,7 +3038,7 @@ def parser() -> argparse.ArgumentParser:
     action.add_argument("session")
     action.add_argument("action", help="Profile action, e.g. submit, interrupt, eof, escape, clear")
     action.add_argument("--pane", help="Explicit pane target, e.g. session:0.0")
-    action.add_argument("--agent", help="Agent profile (claude, codex, gemini, generic). Inferred from the session registry if omitted.")
+    action.add_argument("--agent", help="Agent profile (claude, codex, cursor, gemini, generic). Inferred from the session registry if omitted.")
     action.add_argument("--quiet", action="store_true")
     action.set_defaults(func=action_cmd)
 
@@ -3049,8 +3177,9 @@ def parser() -> argparse.ArgumentParser:
     interrupt.add_argument("--pane", help="Explicit pane target, e.g. session:0.0")
     interrupt.set_defaults(func=interrupt_cmd)
 
-    kill = command("kill", help="Kill a session and remove it from the registry")
-    kill.add_argument("session")
+    kill = command("kill", help="Kill one window target or one guarded session")
+    kill.add_argument("target", help="Session name, or window target such as session:1")
+    kill.add_argument("--force", action="store_true", help="Allow killing attached sessions, multi-window sessions, or last windows")
     kill.set_defaults(func=kill_cmd)
 
     split = command("split", help="Split a pane inside a session")

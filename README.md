@@ -35,7 +35,7 @@ The wrapper is intentionally small. It forwards to `agent-tmux` and does not sto
 ## Golden Path
 
 ```bash
-agent-tmux launch --session reviewer --agent claude --events --require-events --purpose review --run "claude --name reviewer" --log
+agent-tmux launch --session reviewer --events --require-events --purpose review --run "claude --name reviewer" --log
 agent-tmux report
 agent-tmux prompt reviewer "Run tests. When finished or blocked, run: agent-tmux board post --topic review \"concise status memo\""
 agent-tmux events wait --session reviewer --since-mark <mark-id> --ack --json --timeout 1800
@@ -46,9 +46,9 @@ With the project wrapper, replace `agent-tmux` with `.agent/tmux`.
 
 `prompt` infers the agent profile from the session registry and prints the pre-send transcript mark in its receipt. `events wait` and `events list` default `--kind` to the manager attention set (`board_post,needs_input,permission_request,agent_stop,hook_error`); pass `--kind all` to widen, or an explicit comma-separated list to narrow.
 
-For Codex CLI, launch with `--agent codex --run "codex"`. The rest of the loop is identical.
+Recognized `--run` binaries: first-class native events for Claude Code (`claude --name <name>`) and Codex CLI (`codex`); profile-aware prompt keys for Cursor CLI (`cursor-agent`) and Gemini CLI (`gemini`).
 
-`--require-events` makes event wiring reliable: launch fails if native hooks cannot be wired or if the run-command binary is not resolvable on `PATH` or as an absolute executable. For Claude Code, `agent-tmux` writes a session-local settings file under `.agent/tmux.d/hooks/<session>/` and injects `--settings <file>` into simple `claude ...` launch commands. For Codex CLI, it writes a session-local TOML config and a wrapper script under `.agent/tmux.d/hooks/<session>/` and rewrites simple `codex ...` launch commands to use that wrapper. It does not edit global user settings or project settings. Relative paths with separators (e.g. `./bin/claude`) are rejected — pass an absolute path or a `PATH`-resolvable name.
+`--require-events` makes event wiring reliable: launch fails if native hooks cannot be wired or if the run-command binary is not resolvable on `PATH` or as an absolute executable. Wiring is session-local under `.agent/tmux.d/hooks/<session>/` for Claude Code and Codex CLI. It does not edit global user settings or project settings. Relative paths with separators (e.g. `./bin/claude`) are rejected — pass an absolute path or a `PATH`-resolvable name. Per-vendor specifics live in `skills/shared-tmux-terminal/references/wiring-internals.md`.
 
 Events are wakeups for the manager agent. Board posts are durable memos. Neither is task truth. Branch on the returned event kind: read memos for `board_post`, inspect/ask for `needs_input` or `permission_request`, recover from `agent_stop` without a memo, and diagnose `hook_error`.
 
@@ -56,6 +56,7 @@ Events are wakeups for the manager agent. Board posts are durable memos. Neither
 
 - one project-local tmux server, usually at `.agent/tmux.sock`
 - multiple named sessions for agents, shells, dev servers, test watchers, and REPLs
+- guarded cleanup: `kill <session>` refuses risky whole-session cleanup, while `kill <session>:<window>` closes one window
 - a registry under `.agent/tmux.d/registry.json`
 - diagnostics under `.agent/tmux.d/doctor/events.jsonl`
 - pane transcripts under `.agent/tmux.d/logs/`
@@ -86,7 +87,8 @@ Detailed documentation lives in `skills/shared-tmux-terminal/references/`:
 - `agent-contract.md`: reusable agent instruction block for handing the contract to terminal agents.
 - `manager-events.md`: event-driven manager-agent loop, default kind filter, full event meaning, field lessons.
 - `board.md`: append-only memo board for durable agent memos.
-- `hooks.md`: native hook ingestion, vendor-to-canonical mapping, session-local Claude/Codex wiring.
+- `hooks.md`: native hook ingestion, canonical event kinds, the reliable launch path.
+- `wiring-internals.md`: recognized `--run` binaries, per-vendor file layout, rules for adding a new vendor.
 - `agent-profiles.md`: terminal-agent input profiles and profile inference.
 - `recovery.md`: missing sessions, stale history, stuck processes, layout recovery.
 - `human-tmux.md`: attach, mouse scrolling, tmux profile, pane/window navigation for humans.

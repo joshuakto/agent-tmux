@@ -5,14 +5,14 @@ Use this when one agent supervises terminal agents running inside `agent-tmux`.
 ## Core Loop
 
 ```bash
-agent-tmux launch --session reviewer --agent claude --events --require-events --purpose review --run "claude --name reviewer" --log
+agent-tmux launch --session reviewer --events --require-events --purpose review --run "claude --name reviewer" --log
 agent-tmux prompt reviewer "Run the task. When finished or blocked, run: agent-tmux board post --topic review \"concise status memo\""
 agent-tmux events wait --session reviewer --since-mark <mark-id> --ack --json --timeout 1800
 ```
 
-Use `--agent codex --run "codex"` for Codex CLI sessions.
+Use `--run "codex"` for Codex CLI sessions. `--agent` is inferred for recognized binaries; pass it only to override.
 
-`prompt` infers the agent profile from the session registry, so the `--agent` flag is only needed at launch.
+`prompt` infers the agent profile from the session registry. At launch, `--agent` is usually inferred from recognized `--run` binaries.
 Events are small wakeups for the manager agent. Use the mark printed by `prompt` as the event cursor so stale unread events from earlier turns are ignored. Events are not task truth.
 
 ## Default Kind Filter

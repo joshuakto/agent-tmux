@@ -58,6 +58,17 @@ Prefix d
 
 The default prefix is usually `Ctrl-b` unless the user's tmux config changes it.
 
+## Cleanup Safety
+
+Prefer one session per task. For cleanup:
+
+```bash
+agent-tmux kill <session>
+agent-tmux kill <session>:<window-index>
+```
+
+`agent-tmux kill <session>` kills the whole tmux session. It refuses attached sessions and sessions with multiple windows unless `--force` is passed. Passing a window target such as `<session>:1` kills only that window. When killing the last visible session, `agent-tmux` keeps its hidden picker lobby alive so the project tmux socket does not disappear out from under other clients.
+
 ## Human/Agent Coordination
 
 - Tell the agent if you changed pane focus, typed into the UI, or interrupted a process.

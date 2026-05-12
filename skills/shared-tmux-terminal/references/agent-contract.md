@@ -10,7 +10,7 @@ Golden path for supervising terminal agents:
 1. If continuing existing work, scan first:
    agent-tmux list
 2. Launch with native event wiring:
-   agent-tmux launch --session <name> --agent claude --events --require-events --purpose <purpose> --run "claude --name <name>" --log
+   agent-tmux launch --session <name> --events --require-events --purpose <purpose> --run "claude --name <name>" --log
 3. Report the session:
    agent-tmux report
 4. Send terminal-agent instructions:
@@ -26,7 +26,7 @@ Golden path for supervising terminal agents:
 9. If a human wants to inspect:
    agent-tmux attach
 
-`prompt` infers the agent profile from the session registry, so `--agent` is only required at launch.
+`prompt` infers the agent profile from the session registry. `--agent` is inferred at launch for recognized binaries; pass it only to override.
 `events wait` and `events list` default to the manager attention set (`board_post,needs_input,permission_request,agent_stop,hook_error`). Pass `--kind all` to widen, or `--kind <list>` to narrow.
 Do not treat logs, marks, or wait output as task truth.
 Task truth comes from artifacts, tests, commits, process exit status, and explicit reports.
@@ -42,8 +42,8 @@ When supervising another terminal agent, use events and board messages to avoid 
 
 ```text
 Launch with native event wiring when supported:
-agent-tmux launch --session <name> --agent claude --events --require-events --purpose <purpose> --run "claude --name <name>" --log
-agent-tmux launch --session <name> --agent codex --events --require-events --purpose <purpose> --run "codex" --log
+agent-tmux launch --session <name> --events --require-events --purpose <purpose> --run "claude --name <name>" --log
+agent-tmux launch --session <name> --events --require-events --purpose <purpose> --run "codex" --log
 
 Send work:
 agent-tmux prompt <session> "<instruction; when finished or blocked, run: agent-tmux board post --topic <topic> \"concise status memo\">"
