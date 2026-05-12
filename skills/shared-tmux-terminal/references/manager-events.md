@@ -52,6 +52,7 @@ Session lifecycle (emitted by `agent-tmux launch`, not in the default attention 
 
 - `session_started`: `launch` created a new session.
 - `session_reused`: `launch` attached to an existing session in the registry.
+- `session_recovered`: `launch --session <name>` recreated a registered session that was no longer live.
 
 Observability-only kinds (emitted by `hooks ingest` for non-attention vendor hooks; not in the default set and not wired by default for built-in vendors):
 

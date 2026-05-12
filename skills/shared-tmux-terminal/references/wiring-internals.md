@@ -61,7 +61,7 @@ Run command rewrite:
 codex ...  →  .agent/tmux.d/hooks/<session>/codex-with-hooks ...
 ```
 
-The wrapper exec's `codex -c "$(cat .agent/tmux.d/hooks/<session>/codex-hooks.toml)" ...`. The TOML is a single inline `hooks={Stop=[...],PermissionRequest=[...]}` table. `SessionStart` and `UserPromptSubmit` are not wired — `launch` already emits `session_started`/`session_reused`, and prompt submissions have no manager branch.
+The wrapper exec's `codex -c "$(cat .agent/tmux.d/hooks/<session>/codex-hooks.toml)" ...`. The TOML is a single inline `hooks={Stop=[...],PermissionRequest=[...]}` table. `SessionStart` and `UserPromptSubmit` are not wired — `launch` already emits `session_started`/`session_reused`/`session_recovered`, and prompt submissions have no manager branch.
 
 Codex requires hook trust. `agent-tmux` runs `codex app-server -c <config>` and exchanges `initialize` + `hooks/list` messages to capture each hook's `currentHash`, then re-launches Codex with `state={<key>={trusted_hash=...}}` injected so the session sees them as trusted. If trust verification fails, the launch falls back to an unverified config and surfaces `codex hook trust: unverified` in the report.
 

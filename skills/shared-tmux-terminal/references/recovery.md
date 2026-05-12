@@ -4,6 +4,14 @@ Use this only when the golden path is not enough.
 
 ## Missing Or Confusing Sessions
 
+If a session is `Dead but registered`, use the printed hint or run:
+
+```bash
+agent-tmux launch --session <session>
+```
+
+This recreates the tmux session from the saved launch intent; it does not restore the old terminal conversation.
+
 ```bash
 agent-tmux report
 agent-tmux list

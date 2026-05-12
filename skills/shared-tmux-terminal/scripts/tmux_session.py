@@ -916,6 +916,52 @@ def infer_profile_from_run(run: str | None) -> str | None:
     return RUN_BINARY_TO_PROFILE.get(Path(tokens[0]).name)
 
 
+def registry_launch_spec(entry: dict[str, Any]) -> dict[str, Any]:
+    spec = entry.get("launch_spec")
+    if isinstance(spec, dict):
+        normalized = dict(spec)
+        if "run" not in normalized and "run_original" in normalized:
+            normalized["run"] = normalized.get("run_original")
+        return normalized
+
+    events_info = entry.get("events") if isinstance(entry.get("events"), dict) else {}
+    return {
+        "purpose": entry.get("purpose"),
+        "cwd": entry.get("cwd"),
+        "run": entry.get("run"),
+        "agent": entry.get("agent"),
+        "events": bool(events_info.get("requested")),
+        "require_events": False,
+        "log": bool(entry.get("logs")),
+        "log_output": None,
+    }
+
+
+def build_launch_spec(
+    *,
+    purpose: str | None,
+    cwd: Path,
+    run: str | None,
+    agent: str | None,
+    events: bool,
+    require_events: bool,
+    log: bool,
+    log_output: str | None,
+    run_delay: float,
+) -> dict[str, Any]:
+    return {
+        "purpose": purpose,
+        "cwd": str(cwd),
+        "run": run,
+        "agent": agent,
+        "events": bool(events),
+        "require_events": bool(require_events),
+        "log": bool(log),
+        "log_output": log_output,
+        "run_delay": run_delay,
+    }
+
+
 def parse_run_for_wiring(run: str | None, expected_basename: str) -> tuple[list[str] | None, str | None]:
     if not run:
         return None, "no run command to wire"
@@ -992,6 +1038,33 @@ def session_exists(socket: Path, session: str) -> bool:
         return True
     except TmuxError:
         return False
+
+
+def clear_stale_socket_for_launch(socket: Path) -> str | None:
+    if not socket.exists():
+        return None
+    probe = try_tmux(socket, ["list-sessions"])
+    if probe["ok"]:
+        return None
+    message = f"{probe.get('stdout') or ''}\n{probe.get('stderr') or ''}"
+    kind = classify_tmux_failure(socket, message)
+    if kind not in {"stale-socket", "no-server", "connection-error", "socket-missing"}:
+        return None
+    try:
+        socket.unlink()
+    except OSError as exc:
+        return f"could not remove stale socket ({kind}): {exc}"
+    return f"removed stale socket ({kind})"
+
+
+def tmux_failure_allows_launch_recovery(socket: Path, message: str) -> bool:
+    return classify_tmux_failure(socket, message) in {
+        "socket-missing",
+        "stale-socket",
+        "no-server",
+        "connection-error",
+        "session-not-found",
+    }
 
 
 def list_sessions(socket: Path) -> list[dict[str, Any]]:
@@ -1190,6 +1263,21 @@ def resolve_profile(name: str | None) -> tuple[str, dict[str, Any]]:
 
 def infer_session_agent(registry: dict[str, Any], session: str) -> str | None:
     return ((registry.get("sessions") or {}).get(session) or {}).get("agent")
+
+
+def require_live_registered_session(root: Path, socket: Path, registry: dict[str, Any], session: str) -> None:
+    view = compute_session_view(socket, registry)
+    if session in view["live"]:
+        return
+    if view["tmux_error"] and not tmux_failure_allows_launch_recovery(socket, view["tmux_error"]):
+        raise SystemExit(f"tmux probe failed: {view['tmux_error']}")
+    if session in view["dead_but_registered"]:
+        raise SystemExit(
+            f"Session not live: {session}. Recover with: {user_command(root, f'launch --session {session}')}"
+        )
+    if view["tmux_error"]:
+        raise SystemExit(f"tmux probe failed: {view['tmux_error']}")
+    raise SystemExit(f"Session not found: {session}")
 
 
 def target_for_args(socket: Path, session: str, pane: str | None) -> str:
@@ -1547,6 +1635,7 @@ def update_registry_entry(
     run: str | None,
     agent: str | None = None,
     events: dict[str, Any] | None = None,
+    launch_spec: dict[str, Any] | None = None,
 ) -> None:
     registry["project_root"] = str(root)
     registry["socket"] = str(socket)
@@ -1565,6 +1654,8 @@ def update_registry_entry(
     )
     if events is not None:
         entry["events"] = events
+    if launch_spec is not None:
+        entry["launch_spec"] = launch_spec
     sessions[session] = entry
 
 
@@ -1598,31 +1689,44 @@ def launch(args: argparse.Namespace) -> int:
 
     session = args.session or slugify(f"{root.name}-{args.purpose or 'agent'}-{datetime.now().strftime('%H%M%S')}")
     reject_picker_target(session, command="launch")
-    effective_run = args.run
+
+    existing_entry = (registry.get("sessions") or {}).get(session) or {}
+    recover_from_registry = bool(existing_entry) and not session_exists(socket, session)
+    stored_spec = registry_launch_spec(existing_entry) if existing_entry else {}
+    purpose = args.purpose if args.purpose is not None else stored_spec.get("purpose")
+    run_original = args.run if args.run is not None else (stored_spec.get("run") if recover_from_registry else None)
+    effective_run = run_original
+    agent = args.agent if args.agent is not None else stored_spec.get("agent")
+    events_requested = bool(args.events or args.require_events or (recover_from_registry and stored_spec.get("events")))
+    require_events = bool(args.require_events or (recover_from_registry and stored_spec.get("require_events")))
+    log_requested = bool(args.log or (recover_from_registry and stored_spec.get("log")))
+    log_output_value = args.log_output if args.log_output is not None else (stored_spec.get("log_output") if recover_from_registry else None)
+    run_delay = args.run_delay
+    if existing_entry and args.run is None and isinstance(stored_spec.get("run_delay"), (int, float)):
+        run_delay = float(stored_spec["run_delay"])
+
     events_info: dict[str, Any] | None = None
     hook_warning: str | None = None
     agent_inferred_from_run = False
-    if not args.agent:
-        inferred = infer_profile_from_run(args.run)
+    if not agent:
+        inferred = infer_profile_from_run(run_original)
         if inferred:
-            args.agent = inferred
+            agent = inferred
             agent_inferred_from_run = True
-    if args.require_events:
-        args.events = True
-    if args.events:
-        if not args.agent:
+    if events_requested:
+        if not agent:
             events_info = {"requested": True, "status": "missing-agent", "warning": "pass --agent or use a hook-capable --run binary (claude, codex) to enable native hook wiring"}
             hook_warning = events_info["warning"]
         else:
-            profile_name = resolve_profile(args.agent)[0]
+            profile_name = resolve_profile(agent)[0]
             codex_program = "codex"
             if profile_name == "codex":
-                run_tokens, _run_parse_error = parse_run_for_wiring(args.run, "codex")
+                run_tokens, _run_parse_error = parse_run_for_wiring(run_original, "codex")
                 if run_tokens:
                     codex_program = run_tokens[0]
             settings_path, status, warning, hook_config = write_hook_settings(
                 root,
-                args.agent,
+                agent,
                 session,
                 codex_program=codex_program,
             )
@@ -1645,16 +1749,16 @@ def launch(args: argparse.Namespace) -> int:
                 hook_warning = warning
             if settings_path is not None:
                 if events_info["agent"] == "claude":
-                    effective_run, wired, run_warning = wire_claude_run_command(args.run, settings_path)
+                    effective_run, wired, run_warning = wire_claude_run_command(run_original, settings_path)
                 elif events_info["agent"] == "codex":
-                    effective_run, wired, run_warning = wire_codex_run_command(root, session, args.run, settings_path)
+                    effective_run, wired, run_warning = wire_codex_run_command(root, session, run_original, settings_path)
                 else:
                     wired, run_warning = False, f"native hook run wiring is not implemented for agent profile: {events_info['agent']}"
                 events_info["run_wired"] = wired
                 if run_warning:
                     events_info["run_warning"] = run_warning
                     hook_warning = run_warning
-    if args.require_events:
+    if require_events:
         if not events_info:
             raise SystemExit("--require-events needs --events and --agent")
         if events_info.get("status") != "native-hook":
@@ -1663,67 +1767,93 @@ def launch(args: argparse.Namespace) -> int:
             reason = events_info.get("run_warning") or "native hook settings were not injected into the launch command"
             raise SystemExit(f"--require-events failed: {reason}")
 
+    socket_note: str | None = None
+    log_path: Path | None = None
+    replay_run = False
     with file_lock(registry_file):
+        registry = load_registry(registry_file)
+        existing_entry = (registry.get("sessions") or {}).get(session) or {}
+        socket_note = clear_stale_socket_for_launch(socket)
         if session_exists(socket, session):
             mode = "reused"
         else:
             run_tmux(socket, ["new-session", "-Ad", "-s", session, "-c", str(root)])
-            mode = "started"
-    apply_tmux_profile(socket)
+            mode = "recovered" if existing_entry else "started"
+        replay_run = bool(effective_run and (mode != "reused" or args.run is not None))
+        apply_tmux_profile(socket)
 
-    log_path: Path | None = None
-    if args.log:
-        target = active_pane_target(session, list_panes(socket, session))
-        log_path = Path(args.log_output).expanduser() if args.log_output else default_log_file(root, target)
-        if not log_path.is_absolute():
-            log_path = root / log_path
-        start_transcript(socket, target, log_path)
-        update_log_registry(
-            registry,
-            session,
-            target,
-            {"path": str(log_path), "started_at": now_iso(), "stopped_at": None},
+        if log_requested:
+            target = active_pane_target(session, list_panes(socket, session))
+            log_path = Path(log_output_value).expanduser() if log_output_value else default_log_file(root, target)
+            if not log_path.is_absolute():
+                log_path = root / log_path
+            start_transcript(socket, target, log_path)
+            update_log_registry(
+                registry,
+                session,
+                target,
+                {"path": str(log_path), "started_at": now_iso(), "stopped_at": None},
+            )
+
+        if replay_run:
+            if mode in {"started", "recovered"} and run_delay > 0:
+                time.sleep(run_delay)
+            target = active_pane_target(session, list_panes(socket, session))
+            send_text(socket, target, effective_run)
+            run_tmux(socket, ["send-keys", "-t", target, "Enter"])
+
+        if (
+            effective_run
+            and events_info
+            and events_info.get("agent") == "codex"
+            and events_info.get("run_wired")
+            and events_info.get("status") == "native-hook"
+            and events_info.get("trust") == "inline-session-state"
+        ):
+            events_info["codex_readiness"] = {
+                "state": "trusted-inline-session-state",
+                "trusted_hooks": events_info.get("trusted_hooks", []),
+                "detected_at": now_iso(),
+            }
+
+        previous_spec = registry_launch_spec(existing_entry) if existing_entry else {}
+        spec_run = run_original if run_original is not None else previous_spec.get("run")
+        spec_log_output = log_output_value if log_output_value is not None else previous_spec.get("log_output")
+        launch_spec = build_launch_spec(
+            purpose=purpose or previous_spec.get("purpose"),
+            cwd=root,
+            run=spec_run,
+            agent=agent or previous_spec.get("agent"),
+            events=events_requested or bool(previous_spec.get("events")),
+            require_events=require_events or bool(previous_spec.get("require_events")),
+            log=log_requested or bool(previous_spec.get("log")),
+            log_output=spec_log_output,
+            run_delay=run_delay,
         )
+        update_registry_entry(
+            registry,
+            root,
+            socket,
+            session,
+            purpose=purpose or previous_spec.get("purpose"),
+            cwd=str(root),
+            run=spec_run,
+            agent=agent or previous_spec.get("agent"),
+            events=events_info,
+            launch_spec=launch_spec,
+        )
+        save_registry(registry_file, registry)
 
-    if effective_run:
-        if mode == "started" and args.run_delay > 0:
-            time.sleep(args.run_delay)
-        target = active_pane_target(session, list_panes(socket, session))
-        send_text(socket, target, effective_run)
-        run_tmux(socket, ["send-keys", "-t", target, "Enter"])
-
-    if (
-        effective_run
-        and events_info
-        and events_info.get("agent") == "codex"
-        and events_info.get("run_wired")
-        and events_info.get("status") == "native-hook"
-        and events_info.get("trust") == "inline-session-state"
-    ):
-        events_info["codex_readiness"] = {
-            "state": "trusted-inline-session-state",
-            "trusted_hooks": events_info.get("trusted_hooks", []),
-            "detected_at": now_iso(),
-        }
-
-    update_registry_entry(
-        registry,
-        root,
-        socket,
-        session,
-        purpose=args.purpose,
-        cwd=str(root),
-        run=effective_run,
-        agent=args.agent,
-        events=events_info,
-    )
-    save_registry_session(registry_file, registry, session)
     emit_event(
         root,
         {
-            "kind": "session_started" if mode == "started" else "session_reused",
+            "kind": {
+                "started": "session_started",
+                "recovered": "session_recovered",
+                "reused": "session_reused",
+            }[mode],
             "session": session,
-            "agent": args.agent,
+            "agent": agent,
             "source": "agent_tmux",
             "confidence": "explicit",
             "summary": f"{mode}: {session}",
@@ -1733,12 +1863,19 @@ def launch(args: argparse.Namespace) -> int:
 
     panes = list_panes(socket, session)
     print(f"{mode}: {session}")
+    if mode == "recovered":
+        if replay_run:
+            print("recovery: run replayed; terminal conversation history is new")
+        else:
+            print("recovery: terminal conversation history is new; no run command was replayed")
     print(f"socket: {socket}")
     print(f"attach: {user_command(root, f'attach {session}')}")
     print(f"attach picker: {user_command(root, 'attach')}")
     print(f"tmux attach: tmux -S {socket} attach -t {session}")
     print(f"cwd: {root}")
     print(f"registry: {registry_file}")
+    if socket_note:
+        print(f"socket recovery: {socket_note}")
     if log_path:
         print(f"log: {log_path}")
     if events_info is not None:
@@ -1771,7 +1908,7 @@ def launch(args: argparse.Namespace) -> int:
         if hook_warning:
             print(f"hook warning: {hook_warning}")
     elif agent_inferred_from_run:
-        print(f"agent: {args.agent} (inferred from --run)")
+        print(f"agent: {agent} (inferred from --run)")
     print(f"windows: {len({pane['window_index'] for pane in panes})}  panes: {len(panes)}")
     for pane in panes:
         marker = "*" if pane["active"] else " "
@@ -1779,7 +1916,7 @@ def launch(args: argparse.Namespace) -> int:
             f"  {marker} {session}:{pane['window_index']}.{pane['pane_index']} "
             f"{pane['pane_id']} {pane['command']} \"{pane['title']}\""
         )
-    if effective_run:
+    if replay_run:
         print(f"initial command sent: {effective_run}")
     if args.attach:
         return attach_project_tmux(root, socket, session)
@@ -1858,6 +1995,9 @@ def status_cmd(args: argparse.Namespace) -> int:
     session = args.session
     view = compute_session_view(socket, registry)
     if session not in view["live"]:
+        if view["tmux_error"] and not tmux_failure_allows_launch_recovery(socket, view["tmux_error"]):
+            print(f"tmux probe failed: {view['tmux_error']}")
+            return 1
         if session in view["dead_but_registered"]:
             reg = registry.get("sessions", {}).get(session, {})
             print(f"Session not live (registered, killed externally): {session}")
@@ -1867,7 +2007,7 @@ def status_cmd(args: argparse.Namespace) -> int:
                 print(f"  cwd: {reg['cwd']}")
             if reg.get("run"):
                 print(f"  run: {reg['run']}")
-            print(f"  recover with {user_command(root, 'doctor')} or {user_command(root, f'launch --session {session} ...')}")
+            print(f"  recover: {user_command(root, f'launch --session {session}')}")
             return 1
         if view["tmux_error"]:
             print(f"tmux probe failed: {view['tmux_error']}")
@@ -1935,6 +2075,7 @@ def keys_cmd(args: argparse.Namespace) -> int:
 def read_cmd(args: argparse.Namespace) -> int:
     root = project_root(Path(args.cwd) if args.cwd else None)
     socket = socket_path(root, args.socket)
+    registry = load_registry(registry_path(root))
     if args.since_mark:
         if args.all or args.start is not None or args.end is not None or args.no_join:
             raise SystemExit("--since-mark cannot be combined with --all, --start, --end, or --no-join")
@@ -1955,6 +2096,7 @@ def read_cmd(args: argparse.Namespace) -> int:
             print()
         return 0
 
+    require_live_registered_session(root, socket, registry, args.session)
     target = args.pane or args.session
     start: str | int | None
     if args.all:
@@ -1982,6 +2124,8 @@ def read_cmd(args: argparse.Namespace) -> int:
 def dump_cmd(args: argparse.Namespace) -> int:
     root = project_root(Path(args.cwd) if args.cwd else None)
     socket = socket_path(root, args.socket)
+    registry = load_registry(registry_path(root))
+    require_live_registered_session(root, socket, registry, args.session)
     target = args.pane or args.session
     start: str | int | None = "-" if args.all else None
     output = capture_pane(
@@ -2008,6 +2152,7 @@ def dump_cmd(args: argparse.Namespace) -> int:
 def search_cmd(args: argparse.Namespace) -> int:
     root = project_root(Path(args.cwd) if args.cwd else None)
     socket = socket_path(root, args.socket)
+    registry = load_registry(registry_path(root))
     flags = re.MULTILINE | (re.IGNORECASE if args.ignore_case else 0)
     pattern = re.compile(args.pattern, flags)
     targets: list[str] = []
@@ -2018,6 +2163,8 @@ def search_cmd(args: argparse.Namespace) -> int:
     else:
         if not args.pane and not args.session:
             raise SystemExit("search requires a session, --pane, or --all-panes")
+        if args.session:
+            require_live_registered_session(root, socket, registry, args.session)
         targets.append(args.pane or args.session)
 
     any_match = False
@@ -2042,6 +2189,7 @@ def search_cmd(args: argparse.Namespace) -> int:
 def wait_cmd(args: argparse.Namespace) -> int:
     root = project_root(Path(args.cwd) if args.cwd else None)
     socket = socket_path(root, args.socket)
+    registry = load_registry(registry_path(root))
     if args.from_now and args.since_mark:
         raise SystemExit("--from-now and --since-mark are mutually exclusive")
     target = args.pane or args.session
@@ -2052,7 +2200,6 @@ def wait_cmd(args: argparse.Namespace) -> int:
 
     if args.from_now or args.since_mark:
         registry_file = registry_path(root)
-        registry = load_registry(registry_file)
         if args.since_mark:
             mark = resolve_mark(root, args.since_mark)
             if mark.get("session") != args.session:
@@ -2062,6 +2209,7 @@ def wait_cmd(args: argparse.Namespace) -> int:
             log_path = Path(mark["log_path"])
             offset = int(mark["offset"])
         else:
+            require_live_registered_session(root, socket, registry, args.session)
             target = target_for_args(socket, args.session, args.pane)
             log_path, changed = ensure_transcript(root, socket, registry, args.session, target)
             if changed:
@@ -2091,6 +2239,7 @@ def wait_cmd(args: argparse.Namespace) -> int:
                 return 1
             time.sleep(args.interval)
 
+    require_live_registered_session(root, socket, registry, args.session)
     while True:
         last_text = capture_pane(socket, target, lines=args.lines)
         if pattern.search(last_text):
@@ -2133,6 +2282,7 @@ def prompt_cmd(args: argparse.Namespace) -> int:
     socket = socket_path(root, args.socket)
     registry_file = registry_path(root)
     registry = load_registry(registry_file)
+    require_live_registered_session(root, socket, registry, args.session)
     target = target_for_args(socket, args.session, args.pane)
     agent_name = args.agent or infer_session_agent(registry, args.session)
     profile_name, profile = resolve_profile(agent_name)
@@ -2183,6 +2333,7 @@ def mark_cmd(args: argparse.Namespace) -> int:
     socket = socket_path(root, args.socket)
     registry_file = registry_path(root)
     registry = load_registry(registry_file)
+    require_live_registered_session(root, socket, registry, args.session)
     target = target_for_args(socket, args.session, args.pane)
     mark_id, mark, changed = create_mark(root, socket, registry, args.session, target, label=args.label)
     if changed:
@@ -2198,6 +2349,7 @@ def action_cmd(args: argparse.Namespace) -> int:
     root = project_root(Path(args.cwd) if args.cwd else None)
     socket = socket_path(root, args.socket)
     registry = load_registry(registry_path(root))
+    require_live_registered_session(root, socket, registry, args.session)
     target = target_for_args(socket, args.session, args.pane)
     agent_name = args.agent or infer_session_agent(registry, args.session)
     profile_name, profile = resolve_profile(agent_name)
