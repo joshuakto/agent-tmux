@@ -712,8 +712,8 @@ def claude_hook_settings(root: Path, session: str) -> dict[str, Any]:
     }
 
 
-CODEX_HOOK_EVENTS = ["Stop", "PermissionRequest"]
-CODEX_TRUST_EVENT_NAMES = {"stop", "permissionRequest"}
+CODEX_HOOK_EVENTS = ["Stop", "PermissionRequest", "UserPromptSubmit"]
+CODEX_TRUST_EVENT_NAMES = {"stop", "permissionRequest", "userPromptSubmit"}
 CODEX_TRUST_SOURCE = "sessionFlags"
 
 
@@ -1755,6 +1755,8 @@ def launch(args: argparse.Namespace) -> int:
                 else:
                     wired, run_warning = False, f"native hook run wiring is not implemented for agent profile: {events_info['agent']}"
                 events_info["run_wired"] = wired
+                if wired and events_info["agent"] in {"claude", "codex"}:
+                    events_info["prompt_submit_hook"] = True
                 if run_warning:
                     events_info["run_warning"] = run_warning
                     hook_warning = run_warning
@@ -2255,13 +2257,12 @@ def wait_cmd(args: argparse.Namespace) -> int:
         time.sleep(args.interval)
 
 
-def claude_prompt_submit_warning(root: Path, registry: dict[str, Any], session: str, mark_id: str) -> str | None:
-    if list_events(root, session=session, kind="prompt_submitted"):
-        return None
-
+def prompt_submit_warning(root: Path, registry: dict[str, Any], session: str, mark_id: str, profile_name: str) -> str | None:
     session_entry = (registry.get("sessions") or {}).get(session) or {}
     events_info = session_entry.get("events") or {}
     if events_info.get("status") != "native-hook" or not events_info.get("run_wired"):
+        return None
+    if not (events_info.get("prompt_submit_hook") or profile_name == "claude"):
         return None
 
     since = str(resolve_mark(root, mark_id).get("created_at") or "")
@@ -2307,8 +2308,8 @@ def prompt_cmd(args: argparse.Namespace) -> int:
                 time.sleep(delay)
             send_profile_action(socket, target, profile, "submit")
     warning: str | None = None
-    if args.submit and mark_id and profile_name == "claude":
-        warning = claude_prompt_submit_warning(root, registry, session_key, mark_id)
+    if args.submit and mark_id:
+        warning = prompt_submit_warning(root, registry, session_key, mark_id, profile_name)
     receipt = {
         "mark": mark_id,
         "profile": profile_name,

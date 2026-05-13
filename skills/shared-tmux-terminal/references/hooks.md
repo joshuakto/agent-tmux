@@ -35,7 +35,7 @@ agent-tmux hooks show-config --agent <profile> --session reviewer
 - `tool_event` — observability-only tool-call event
 - `agent_event` — anything else
 
-The default `--kind` filter for `events wait`/`list` is `board_post,needs_input,permission_request,agent_stop,hook_error`. The other kinds are observability records. The adapter is observability-only — it never approves, denies, or changes a permission decision.
+The default `--kind` filter for `events wait`/`list` is `board_post,needs_input,permission_request,agent_stop,hook_error`. The other kinds are observability records. Claude and Codex also wire `UserPromptSubmit` so `prompt` can confirm delivery. The adapter is observability-only — it never approves, denies, or changes a permission decision.
 
 Native lifecycle events can be multiple per turn. Keep raw events intact and branch on the canonical kind; do not treat them as task truth. Use the mark returned by `prompt` with `events wait --since-mark` so older native events do not wake the manager.
 

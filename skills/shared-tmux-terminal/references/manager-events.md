@@ -54,9 +54,9 @@ Session lifecycle (emitted by `agent-tmux launch`, not in the default attention 
 - `session_reused`: `launch` attached to an existing session in the registry.
 - `session_recovered`: `launch --session <name>` recreated a registered session that was no longer live.
 
-Observability-only kinds (emitted by `hooks ingest` for non-attention vendor hooks; not in the default set and not wired by default for built-in vendors):
+Other event kinds (only shown with `--kind all` or an explicit `--kind`):
 
-- `prompt_submitted`: vendor `UserPromptSubmit` hook fired.
+- `prompt_submitted`: `UserPromptSubmit` hook fired for prompt delivery confirmation.
 - `tool_event`: vendor `PreToolUse`/`PostToolUse` hook fired.
 - `agent_event`: catch-all for any other vendor hook payload.
 

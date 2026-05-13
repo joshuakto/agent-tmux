@@ -67,7 +67,7 @@ For recovery tools, read `references/recovery.md`. For profile behavior, read `r
 .agent/tmux.sock
 .agent/tmux.d/registry.json
 .agent/tmux.d/marks.json
-.agent/tmux.d/events/
+.agent/tmux.d/events/events/
 .agent/tmux.d/hooks/
 .agent/tmux.d/doctor/events.jsonl
 .agent/tmux.d/logs/
