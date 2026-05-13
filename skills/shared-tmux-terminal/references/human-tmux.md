@@ -64,10 +64,9 @@ Prefer one session per task. For cleanup:
 
 ```bash
 agent-tmux kill <session>
-agent-tmux kill <session>:<window-index>
 ```
 
-`agent-tmux kill <session>` kills the whole tmux session. It refuses attached sessions and sessions with multiple windows unless `--force` is passed. Passing a window target such as `<session>:1` kills only that window. When killing the last visible session, `agent-tmux` keeps its hidden picker lobby alive so the project tmux socket does not disappear out from under other clients.
+`agent-tmux kill <session>` drops the session's registry entry and, if the session is currently live, also kills it in tmux. It refuses attached or multi-window live sessions unless `--force` is passed. Dead-but-registered sessions are dropped without `--force`. When killing the last visible session, `agent-tmux` keeps its hidden picker lobby alive so the project tmux socket does not disappear out from under other clients. Window-level close is no longer fronted by `agent-tmux`; use `tmux -S .agent/tmux.sock kill-window -t <session>:<window>` if needed.
 
 ## Human/Agent Coordination
 

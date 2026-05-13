@@ -2939,43 +2939,41 @@ def interrupt_cmd(args: argparse.Namespace) -> int:
 
 def kill_cmd(args: argparse.Namespace) -> int:
     reject_picker_target(args.target, command="kill")
+    if ":" in args.target:
+        raise SystemExit(
+            f"window targets are no longer accepted by kill: {args.target!r}. "
+            "Use the session name to drop the whole registry entry, "
+            "or run `tmux -S <socket> kill-window -t <target>` for a raw window op."
+        )
     root = project_root(Path(args.cwd) if args.cwd else None)
     socket = socket_path(root, args.socket)
-    if ":" in args.target:
-        session = session_part(args.target)
-        if live_session(socket, session) is None:
-            raise SystemExit(f"session is not live: {session}")
-        count = window_count(socket, session)
-        if count <= 1 and not args.force:
-            raise SystemExit(
-                f"{args.target!r} is the last window in session {session!r}; killing it would kill the session. "
-                "Pass the session name instead if you mean to close the whole session, or use --force."
-            )
-        if count <= 1:
-            ensure_picker_session(socket)
-        run_tmux(socket, ["kill-window", "-t", args.target])
-        print(f"killed window: {args.target}")
-        return 0
-
-    sess = live_session(socket, args.target)
-    if sess is None:
-        raise SystemExit(f"session is not live: {args.target}")
-    if sess["attached"] and not args.force:
-        raise SystemExit(
-            f"session {args.target!r} is attached; use interrupt or attach to inspect, "
-            "or pass --force if you really mean to kill it"
-        )
-    if sess["windows"] > 1 and not args.force:
-        raise SystemExit(
-            f"session {args.target!r} has {sess['windows']} windows; pass a window target "
-            f"(for example {args.target}:<window-index>) or use --force."
-        )
-    if len(list_sessions(socket)) == 1:
-        ensure_picker_session(socket)
-    run_tmux(socket, ["kill-session", "-t", args.target])
     registry_file = registry_path(root)
+    registry = load_registry(registry_file)
+    registered = (registry.get("sessions") or {}).get(args.target) is not None
+
+    sess = live_session(socket, args.target) if session_exists(socket, args.target) else None
+    if sess is None and not registered:
+        raise SystemExit(f"unknown session: {args.target}")
+
+    if sess is not None:
+        if sess["attached"] and not args.force:
+            raise SystemExit(
+                f"session {args.target!r} is attached; use interrupt or attach to inspect, "
+                "or pass --force if you really mean to kill it"
+            )
+        if sess["windows"] > 1 and not args.force:
+            raise SystemExit(
+                f"session {args.target!r} has {sess['windows']} windows; pass --force if you really mean to kill it."
+            )
+        if len(list_sessions(socket)) == 1:
+            ensure_picker_session(socket)
+        run_tmux(socket, ["kill-session", "-t", args.target])
+
     remove_registry_session(registry_file, args.target)
-    print(f"killed session: {args.target}")
+    if sess is None:
+        print(f"removed registry entry: {args.target}")
+    else:
+        print(f"killed session: {args.target}")
     return 0
 
 
@@ -3330,9 +3328,9 @@ def parser() -> argparse.ArgumentParser:
     interrupt.add_argument("--pane", help="Explicit pane target, e.g. session:0.0")
     interrupt.set_defaults(func=interrupt_cmd)
 
-    kill = command("kill", help="Kill one window target or one guarded session")
-    kill.add_argument("target", help="Session name, or window target such as session:1")
-    kill.add_argument("--force", action="store_true", help="Allow killing attached sessions, multi-window sessions, or last windows")
+    kill = command("kill", help="Kill a registered session and remove its registry entry")
+    kill.add_argument("target", help="Session name registered in this project")
+    kill.add_argument("--force", action="store_true", help="Allow killing attached or multi-window live sessions")
     kill.set_defaults(func=kill_cmd)
 
     split = command("split", help="Split a pane inside a session")
