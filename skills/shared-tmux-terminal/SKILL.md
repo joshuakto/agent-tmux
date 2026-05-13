@@ -22,8 +22,8 @@ Use this skill when work needs a live terminal shared by an agent and a human.
 Supervised worker loop. Use `agent-tmux` (or `.agent/tmux` if the wrapper is installed). Variables splice IDs between steps; `jq` is the wiring.
 
 ```bash
-# 1. Launch (--agent inferred from --run basename).
-agent-tmux launch --session reviewer --events --require-events --run "claude --name reviewer" --log
+# 1. Launch (--agent inferred from --run basename; --purpose labels the session in list/report).
+agent-tmux launch --session reviewer --purpose "review" --events --require-events --run "claude --name reviewer" --log
 
 # 2. Send task and capture mark. The task MUST end with the report-back command verbatim.
 TASK='<task>. When done or blocked, run: agent-tmux board post --topic <topic> "<concise memo>"'
