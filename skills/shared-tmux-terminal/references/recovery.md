@@ -92,13 +92,14 @@ Use pane/window operations to preserve running processes while making them easie
 
 ```bash
 agent-tmux split <session> --horizontal
-agent-tmux kill <session>:<window-index>
 agent-tmux join-pane <source-pane> <target-pane>
 agent-tmux move-window <source-window> <target-session>:
 ```
+
+For raw window close, drop to tmux: `tmux -S .agent/tmux.sock kill-window -t <session>:<window>`.
 
 After layout changes, run `report` and tell the human the attach command.
 
 ## Cleanup
 
-Use `kill <session>` to dispose of a single-purpose session you no longer need, or `kill <session>:<window-index>` to close one window of a multi-window session. `kill <session>` refuses attached or multi-window sessions unless `--force` is passed — that guard exists so a confused agent does not destroy work the human is watching.
+Use `kill <session>` to drop a session you no longer need. It removes the registry entry whether or not the session is live in tmux; for a live session it also tears down the pane. `kill` refuses attached or multi-window live sessions unless `--force` is passed — that guard exists so a confused agent does not destroy work the human is watching. Dead-but-registered sessions are dropped without `--force`.

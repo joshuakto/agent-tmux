@@ -54,7 +54,7 @@ Events are wakeups for the manager agent. Board posts are durable memos. Neither
 
 - one project-local tmux server, usually at `.agent/tmux.sock`
 - multiple named sessions for agents, shells, dev servers, test watchers, and REPLs
-- guarded cleanup: `kill <session>` refuses risky whole-session cleanup, while `kill <session>:<window>` closes one window
+- guarded cleanup: `kill <session>` drops the registry entry and tears down the live session if any, refusing attached or multi-window live sessions without `--force`
 - a registry under `.agent/tmux.d/registry.json`
 - diagnostics under `.agent/tmux.d/doctor/events.jsonl`
 - pane transcripts under `.agent/tmux.d/logs/`
