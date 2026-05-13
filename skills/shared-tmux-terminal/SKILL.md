@@ -22,8 +22,9 @@ Use this skill when work needs a live terminal shared by an agent and a human.
 Supervised worker loop. Use `agent-tmux` (or `.agent/tmux` if the wrapper is installed). Variables splice IDs between steps; `jq` is the wiring.
 
 ```bash
-# 1. Launch (--agent inferred from --run basename).
-agent-tmux launch --session reviewer --events --require-events --run "claude --name reviewer" --log
+# 1. Launch (--agent inferred from --run basename). Capture mode to confirm startup.
+LAUNCH=$(agent-tmux launch --session reviewer --events --require-events --run "claude --name reviewer" --log --json)
+# $LAUNCH keys: {mode, session, socket, registry, cwd, attach, attach_picker, log?, events_status?, hook_warning?}
 
 # 2. Send task and capture mark. The task MUST end with the report-back command verbatim.
 TASK='<task>. When done or blocked, run: agent-tmux board post --topic <topic> "<concise memo>"'
@@ -39,17 +40,19 @@ case "$KIND" in
   needs_input|permission_request)   agent-tmux read reviewer --since-mark "$MARK" ;;  # inspect, decide
   agent_stop)                       agent-tmux read reviewer --since-mark "$MARK" ;;  # no memo; recover
   hook_error)                       echo "see references/hooks.md" ;;
+  timeout)                          echo "no event within timeout; inspect or re-prompt" ;;
 esac
 ```
 
+- **Launch JSON:** `{mode, session, socket, registry, cwd, attach, attach_picker, log?, events_status?, hook_warning?}`; `.mode` is `started`, `reused`, or `recovered`.
 - **Receipt JSON:** `{mark, profile, session, submitted, target}`; `.mark` is your event cursor.
-- **Event JSON:** `{id, kind, session, agent, source, summary, read_command, message_id?, topic?, path?}`; `.message_id` is set when `kind == board_post`.
+- **Event JSON:** `{id, kind, session, agent, source, summary, read_command, message_id?, topic?, path?}`; `.message_id` is set when `kind == board_post`; `kind == timeout` when `events wait` times out.
 - **Recognized `--run` basenames** (`--agent` auto-inferred): `claude`, `codex`, `opencode`, `gemini`. `--require-events` succeeds only for ones with native hooks — see `references/wiring-internals.md`.
 - The board is the report channel; the transcript is not task truth. Treat memos as reports, verify artifacts.
 
 ## Decision Rules
 
-- Continuing existing shared work: run `list` first; reuse only when there is an obvious matching live session.
+- Continuing existing shared work: run `list --json` first; reuse only when there is an obvious matching live session.
 - Need raw terminal evidence (not an event): use `read --since-mark <mark-id>`, `wait --since-mark <mark-id>`, or `search`.
 - Session seems missing or socket access fails: `list`/`status` flag `Dead but registered` for sessions killed externally. Run `doctor` for full diagnostics; do not conclude absence from a failed probe.
 - Human wants to inspect/interfere: report the no-arg `attach` command; it opens the live-session picker.

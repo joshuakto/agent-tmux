@@ -69,6 +69,7 @@ Pass `--kind all` (or an explicit list) to surface these.
 - `permission_request`: surface the decision; never auto-approve.
 - `agent_stop`: if no memo arrived, read recent output or prompt the worker to post one.
 - `hook_error`: run `hooks status` or `doctor`.
+- `timeout`: `events wait --json` returned this synthetic kind (exit 1) when the timeout elapsed with no event. Inspect or re-prompt; do not treat as task completion or failure.
 
 Use `read`, `wait`, `search`, and `attach` only for recovery, inherited sessions, or evidence checks.
 

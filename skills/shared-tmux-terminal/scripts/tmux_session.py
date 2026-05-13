@@ -1862,6 +1862,28 @@ def launch(args: argparse.Namespace) -> int:
     )
 
     panes = list_panes(socket, session)
+    if getattr(args, "json", False):
+        receipt: dict[str, Any] = {
+            "mode": mode,
+            "session": session,
+            "socket": str(socket),
+            "registry": str(registry_file),
+            "cwd": str(root),
+            "attach": user_command(root, f"attach {session}"),
+            "attach_picker": user_command(root, "attach"),
+        }
+        if log_path:
+            receipt["log"] = str(log_path)
+        if events_info is not None:
+            receipt["events_status"] = events_info.get("status")
+            if hook_warning:
+                receipt["hook_warning"] = hook_warning
+        if socket_note:
+            receipt["socket_recovery"] = socket_note
+        print(json.dumps(receipt, sort_keys=True))
+        if args.attach:
+            return attach_project_tmux(root, socket, session)
+        return 0
     print(f"{mode}: {session}")
     if mode == "recovered":
         if replay_run:
@@ -1929,20 +1951,56 @@ def list_cmd(args: argparse.Namespace) -> int:
     registry_file = registry_path(root)
     registry = load_registry(registry_file)
     view = compute_session_view(socket, registry)
+    use_json = getattr(args, "json", False)
     if not socket.exists():
         if view["registered"]:
+            if use_json:
+                print(json.dumps({"sessions": [], "dead_but_registered": view["registered"], "socket": str(socket)}, sort_keys=True))
+                return 1
             print(f"Project tmux socket is missing but registry has sessions at {registry_file}:")
             for name in view["registered"]:
                 print(f"- {name}")
             print(f"Run {user_command(root, 'doctor')} to diagnose stale registry/socket state.")
             return 1
+        if use_json:
+            print(json.dumps({"sessions": [], "socket": str(socket)}, sort_keys=True))
+            return 0
         print(f"No project tmux socket found at {socket}")
         print(f"Start one with {user_command(root, 'launch --purpose <purpose>')}")
         return 0
     if view["tmux_error"]:
-        print(f"tmux probe failed: {view['tmux_error']}")
+        if not use_json:
+            print(f"tmux probe failed: {view['tmux_error']}")
     if not view["live_sessions"] and not view["dead_but_registered"]:
-        print(f"No live tmux sessions found at {socket}")
+        if use_json:
+            print(json.dumps({"sessions": [], "socket": str(socket)}, sort_keys=True))
+        else:
+            print(f"No live tmux sessions found at {socket}")
+        return 0
+
+    if use_json:
+        sessions_out = []
+        for sess in view["live_sessions"]:
+            name = sess["name"]
+            panes = list_panes(socket, name)
+            reg = registry.get("sessions", {}).get(name, {})
+            active = next((pane for pane in panes if pane["active"]), panes[0] if panes else None)
+            entry: dict[str, Any] = {
+                "name": name,
+                "attached": sess["attached"],
+                "panes": len(panes),
+            }
+            if active:
+                entry["cmd"] = active["command"]
+            if reg.get("agent"):
+                entry["agent"] = reg["agent"]
+            if reg.get("purpose"):
+                entry["purpose"] = reg["purpose"]
+            sessions_out.append(entry)
+        result: dict[str, Any] = {"sessions": sessions_out, "socket": str(socket)}
+        if view["dead_but_registered"]:
+            result["dead_but_registered"] = view["dead_but_registered"]
+        print(json.dumps(result, sort_keys=True))
         return 0
 
     print(f"Socket: {socket}")
@@ -2462,7 +2520,9 @@ def events_cmd(args: argparse.Namespace) -> int:
                 print_event(event, json_output=args.json)
                 return 0
             if time.monotonic() >= deadline:
-                if not args.quiet:
+                if args.json:
+                    print(json.dumps({"kind": "timeout", "timeout": True}, sort_keys=True))
+                elif not args.quiet:
                     print("timeout waiting for event")
                 return 1
             time.sleep(args.interval)
@@ -2551,6 +2611,17 @@ def board_cmd(args: argparse.Namespace) -> int:
                 "path": str(path),
             },
         )
+        if getattr(args, "json", False):
+            receipt: dict[str, Any] = {
+                "message_id": message_id,
+                "topic": args.topic,
+                "path": str(path),
+                "read_command": read_command,
+            }
+            if session:
+                receipt["session"] = session
+            print(json.dumps(receipt, sort_keys=True))
+            return 0
         print(f"posted: {message_id}")
         print(f"topic: {args.topic}")
         if session:
@@ -3071,9 +3142,11 @@ def parser() -> argparse.ArgumentParser:
     launch_cmd.add_argument("--log", action="store_true", help="Start transcript logging for the active pane")
     launch_cmd.add_argument("--log-output", help="Transcript path; defaults under .agent/tmux.d/logs/")
     launch_cmd.add_argument("--attach", action="store_true", help="Attach after launch")
+    launch_cmd.add_argument("--json", action="store_true", help="Emit a machine-readable receipt: {mode, session, socket, registry, cwd, attach, attach_picker, log?, events_status?, hook_warning?}")
     launch_cmd.set_defaults(func=launch)
 
     list_p = command("list", help="List live sessions")
+    list_p.add_argument("--json", action="store_true", help="Emit machine-readable session list: {sessions, socket, dead_but_registered?}")
     list_p.set_defaults(func=list_cmd)
 
     report = command("report", help="Show a detailed report of all live sessions")
@@ -3260,6 +3333,7 @@ def parser() -> argparse.ArgumentParser:
     board_post.add_argument("--from", dest="from_agent", help="Poster name; inferred inside a managed tmux pane")
     board_post.add_argument("--session", help="Related tmux session")
     board_post.add_argument("--body-file", help="Read message body from a file")
+    board_post.add_argument("--json", action="store_true", help="Emit machine-readable receipt: {message_id, topic, session?, path, read_command}")
     board_post.add_argument("body", nargs="?", help="Message body; stdin is used if omitted")
     board_post.set_defaults(func=board_cmd)
     board_list = board_sub.add_parser("list", help="List board messages")

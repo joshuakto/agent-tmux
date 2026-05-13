@@ -8,9 +8,9 @@ Run from the project root, or pass --cwd /path/to/project.
 
 Golden path for supervising terminal agents:
 1. If continuing existing work, scan first:
-   agent-tmux list
+   agent-tmux list --json
 2. Launch with native event wiring:
-   agent-tmux launch --session <name> --events --require-events --purpose <purpose> --run "claude --name <name>" --log
+   agent-tmux launch --session <name> --events --require-events --purpose <purpose> --run "claude --name <name>" --log --json
 3. Report the session:
    agent-tmux report
 4. Send terminal-agent instructions:
