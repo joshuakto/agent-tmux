@@ -2343,10 +2343,13 @@ def mark_cmd(args: argparse.Namespace) -> int:
     mark_id, mark, changed = create_mark(root, socket, registry, args.session, target, label=args.label)
     if changed:
         save_registry_session(registry_file, registry, session_name_from_target(args.session, target))
-    print(f"mark created: {mark_id}")
-    print(f"target: {mark['target']}")
-    print(f"log: {mark['log_path']}")
-    print(f"offset: {mark['offset']}")
+    if getattr(args, "json", False):
+        print(json.dumps({"mark": mark_id, "target": mark["target"], "log": mark["log_path"], "offset": mark["offset"]}, sort_keys=True))
+    else:
+        print(f"mark created: {mark_id}")
+        print(f"target: {mark['target']}")
+        print(f"log: {mark['log_path']}")
+        print(f"offset: {mark['offset']}")
     return 0
 
 
@@ -2400,7 +2403,7 @@ def events_cmd(args: argparse.Namespace) -> int:
             else:
                 event = json.loads(Path(json_input).expanduser().read_text())
             if not isinstance(event, dict):
-                raise SystemExit("--json must provide a JSON object")
+                raise SystemExit("--from-json must provide a JSON object")
         if args.kind:
             event["kind"] = args.kind
         if args.session:
@@ -2556,12 +2559,18 @@ def board_cmd(args: argparse.Namespace) -> int:
                 "path": str(path),
             },
         )
-        print(f"posted: {message_id}")
-        print(f"topic: {args.topic}")
-        if session:
-            print(f"session: {session}")
-        print(f"path: {path}")
-        print(f"read: {read_command}")
+        if getattr(args, "json", False):
+            record: dict[str, Any] = {"message_id": message_id, "topic": args.topic, "path": str(path), "read_command": read_command}
+            if session:
+                record["session"] = session
+            print(json.dumps(record, sort_keys=True))
+        else:
+            print(f"posted: {message_id}")
+            print(f"topic: {args.topic}")
+            if session:
+                print(f"session: {session}")
+            print(f"path: {path}")
+            print(f"read: {read_command}")
         return 0
 
     if args.board_action == "list":
@@ -3200,6 +3209,7 @@ def parser() -> argparse.ArgumentParser:
     mark.add_argument("session")
     mark.add_argument("--pane", help="Explicit pane target, e.g. session:0.0")
     mark.add_argument("--label", help="Optional human-readable label")
+    mark.add_argument("--json", action="store_true", help="Emit a machine-readable receipt with mark id, target, log path, and offset")
     mark.set_defaults(func=mark_cmd)
 
     action = command("action", help="Send a profile action, usually for existing UI text or recovery")
@@ -3224,8 +3234,8 @@ def parser() -> argparse.ArgumentParser:
     events_emit.add_argument("--source", default="agent_tmux", help="Event source")
     events_emit.add_argument("--confidence", default="explicit", help="Event confidence")
     events_emit.add_argument("--read-command", help="Command that reads related details")
-    events_emit.add_argument("--json", dest="json_input", help="Read event JSON object from path or '-'")
-    events_emit.add_argument("--json-output", dest="json", action="store_true", help="Print event as JSON")
+    events_emit.add_argument("--from-json", dest="json_input", help="Read event JSON object from path or '-'")
+    events_emit.add_argument("--json", action="store_true", help="Print emitted event as JSON")
     events_emit.set_defaults(func=events_cmd)
     events_list = events_sub.add_parser("list", help="List events")
     events_list.add_argument("--session", help="Filter by session")
@@ -3277,6 +3287,7 @@ def parser() -> argparse.ArgumentParser:
     board_post.add_argument("--session", help="Related tmux session")
     board_post.add_argument("--body-file", help="Read message body from a file")
     board_post.add_argument("body", nargs="?", help="Message body; stdin is used if omitted")
+    board_post.add_argument("--json", action="store_true", help="Emit a machine-readable receipt with message_id, topic, path, and read_command")
     board_post.set_defaults(func=board_cmd)
     board_list = board_sub.add_parser("list", help="List board messages")
     board_list.add_argument("--topic")
