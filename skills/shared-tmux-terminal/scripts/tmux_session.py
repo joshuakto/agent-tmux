@@ -346,7 +346,7 @@ def try_tmux(socket: Path, args: list[str]) -> dict[str, Any]:
             "cmd": cmd,
             "returncode": 127,
             "stdout": "",
-            "stderr": str(exc),
+            "stderr": f"tmux exec failed: {exc}",
             "ok": False,
         }
     return {
@@ -436,6 +436,10 @@ def classify_tmux_failure(socket: Path, message: str) -> str:
     text = message.lower()
     if "operation not permitted" in text or "permission denied" in text:
         return "permission-denied"
+    if "tmux exec failed" in text:
+        return "tmux-exec-error"
+    if "socket operation on non-socket" in text or "not a socket" in text:
+        return "invalid-socket"
     if "no such file or directory" in text:
         return "socket-missing" if not socket.exists() else "stale-socket"
     if "no server running" in text:
@@ -2951,7 +2955,20 @@ def kill_cmd(args: argparse.Namespace) -> int:
     registry = load_registry(registry_file)
     registered = (registry.get("sessions") or {}).get(args.target) is not None
 
-    sess = live_session(socket, args.target) if session_exists(socket, args.target) else None
+    probe = try_tmux(socket, ["has-session", "-t", args.target])
+    if probe["ok"]:
+        sess = live_session(socket, args.target)
+    else:
+        sess = None
+        message = f"{probe.get('stdout') or ''}\n{probe.get('stderr') or ''}".strip()
+        if not message:
+            message = f"tmux exited with status {probe.get('returncode')}"
+        if not tmux_failure_allows_launch_recovery(socket, message):
+            kind = classify_tmux_failure(socket, message)
+            raise SystemExit(
+                f"tmux probe failed: {kind}; left registry unchanged for {args.target!r}. "
+                f"Run {user_command(root, 'doctor')}."
+            )
     if sess is None and not registered:
         raise SystemExit(f"unknown session: {args.target}")
 
