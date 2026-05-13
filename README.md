@@ -59,7 +59,7 @@ Events are wakeups for the manager agent. Board posts are durable memos. Neither
 - diagnostics under `.agent/tmux.d/doctor/events.jsonl`
 - pane transcripts under `.agent/tmux.d/logs/`
 - transcript marks under `.agent/tmux.d/marks.json`
-- one-file-per-event manager events under `.agent/tmux.d/events/`
+- one-file-per-event manager events under `.agent/tmux.d/events/events/`
 - one-file-per-message board memos under `.agent/board/`
 - session-local native hook ingestion for Claude Code and Codex CLI
 - a project wrapper at `.agent/tmux`
