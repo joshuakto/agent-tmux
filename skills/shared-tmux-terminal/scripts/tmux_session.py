@@ -2470,7 +2470,7 @@ def events_cmd(args: argparse.Namespace) -> int:
                 print_event(event, json_output=args.json)
                 return 0
             if time.monotonic() >= deadline:
-                if not args.quiet:
+                if not args.quiet and not args.json:
                     print("timeout waiting for event")
                 return 1
             time.sleep(args.interval)
