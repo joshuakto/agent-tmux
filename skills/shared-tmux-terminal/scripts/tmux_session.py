@@ -2470,7 +2470,9 @@ def events_cmd(args: argparse.Namespace) -> int:
                 print_event(event, json_output=args.json)
                 return 0
             if time.monotonic() >= deadline:
-                if not args.quiet and not args.json:
+                if args.json:
+                    print(json.dumps({"timeout": True, "session": args.session}))
+                elif not args.quiet:
                     print("timeout waiting for event")
                 return 1
             time.sleep(args.interval)
@@ -3265,7 +3267,7 @@ def parser() -> argparse.ArgumentParser:
     )
     events_wait.add_argument("--topic", help="Filter by board/event topic")
     events_wait.add_argument("--timeout", type=float, default=1800)
-    events_wait.add_argument("--interval", type=float, default=1.0)
+    events_wait.add_argument("--interval", type=float, default=0.5)
     events_wait.add_argument("--consumer", help="Consumer name for unread filtering")
     events_wait.add_argument("--since-mark", help="Wait only for events created after a transcript mark")
     events_wait.add_argument("--from-now", action="store_true", help="Wait only for events created after invocation")
