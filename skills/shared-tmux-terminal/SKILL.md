@@ -44,7 +44,7 @@ esac
 
 - **Receipt JSON:** `{mark, profile, session, submitted, target}`; `.mark` is your event cursor.
 - **Event JSON:** `{id, kind, session, agent, source, summary, read_command, message_id?, topic?, path?}`; `.message_id` is set when `kind == board_post`.
-- **Recognized `--run` basenames** (`--agent` auto-inferred): `claude`, `codex`, `opencode`, `gemini`. `--require-events` succeeds only for ones with native hooks — see `references/wiring-internals.md`.
+- **Recognized `--run` basenames** (`--agent` auto-inferred): `claude`, `codex`, `opencode`, `pi`, `gemini`. `--require-events` succeeds only for native-hook profiles (`claude`, `codex`, `opencode`) — see `references/wiring-internals.md`.
 - The board is the report channel; the transcript is not task truth. Treat memos as reports, verify artifacts.
 
 ## Decision Rules

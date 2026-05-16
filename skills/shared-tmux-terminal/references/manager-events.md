@@ -10,7 +10,7 @@ agent-tmux prompt reviewer "Run the task. When finished or blocked, run: agent-t
 agent-tmux events wait --session reviewer --since-mark <mark-id> --ack --json --timeout 1800
 ```
 
-Use `--run "codex"` for Codex CLI sessions. `--agent` is inferred for recognized binaries; pass it only to override.
+Use the same command shape for native-hook CLIs such as `--run "codex"` or `--run "opencode"`. `--agent` is inferred for recognized binaries; pass it only to override.
 
 `prompt` infers the agent profile from the session registry. At launch, `--agent` is usually inferred from recognized `--run` binaries.
 Events are small wakeups for the manager agent. Use the mark printed by `prompt` as the event cursor so stale unread events from earlier turns are ignored. Events are not task truth.

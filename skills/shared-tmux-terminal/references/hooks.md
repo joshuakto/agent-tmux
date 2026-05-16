@@ -1,6 +1,6 @@
 # Native Hooks
 
-Use native hooks when a manager agent needs reliable wakeups from a terminal-agent session. Claude Code and Codex CLI are the first-class native-event targets.
+Use native hooks when a manager agent needs reliable wakeups from a terminal-agent session. Claude Code, Codex CLI, and OpenCode are the native-event targets.
 
 ## Reliable Path
 
@@ -12,7 +12,7 @@ agent-tmux events wait --session reviewer --since-mark <mark-id> --ack --json --
 
 `--agent` is inferred from the `--run` binary basename when omitted; pass it explicitly to override. `--require-events` fails launch unless `agent-tmux` can verify session-local hook wiring *and* resolve the run-command binary (`shutil.which` for bare names, `is_file()` + executable check for absolute paths). Relative paths with separators (e.g. `./bin/claude`) are rejected.
 
-The launch report prints exactly what got wired (settings file, wrapper, trust state). Read that — do not assume from documentation. For which `--run` basenames are recognized and which support native hooks, see `references/wiring-internals.md`.
+The launch report prints exactly what got wired (settings file, plugin, wrapper, trust state, or profile-only status). Read that — do not assume from documentation. For which `--run` basenames are recognized and which support native hooks, see `references/wiring-internals.md`.
 
 `prompt` infers the agent profile from the session registry, so `--agent` is only relevant at launch. `events wait`/`list` default to the manager attention set; pass `--kind all` to widen.
 
@@ -35,7 +35,7 @@ agent-tmux hooks show-config --agent <profile> --session reviewer
 - `tool_event` — observability-only tool-call event
 - `agent_event` — anything else
 
-The default `--kind` filter for `events wait`/`list` is `board_post,needs_input,permission_request,agent_stop,hook_error`. The other kinds are observability records. Claude and Codex also wire `UserPromptSubmit` so `prompt` can confirm delivery. The adapter is observability-only — it never approves, denies, or changes a permission decision.
+The default `--kind` filter for `events wait`/`list` is `board_post,needs_input,permission_request,agent_stop,hook_error`. The other kinds are observability records. Claude and Codex also wire `UserPromptSubmit` so `prompt` can confirm delivery. OpenCode wires `session.idle`, `permission.asked`, and `session.error`. The adapter is observability-only — it never approves, denies, or changes a permission decision.
 
 Native lifecycle events can be multiple per turn. Keep raw events intact and branch on the canonical kind; do not treat them as task truth. Use the mark returned by `prompt` with `events wait --since-mark` so older native events do not wake the manager.
 

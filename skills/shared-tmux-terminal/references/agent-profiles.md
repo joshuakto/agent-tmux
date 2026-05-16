@@ -44,7 +44,7 @@ agent-tmux raw keys reviewer Tab Enter
 
 ## Current Conservative Actions
 
-Built-in profiles expose the same stable actions:
+Most built-in profiles expose the same stable actions:
 
 ```text
 submit: Enter
@@ -54,4 +54,16 @@ escape: Escape
 clear: C-l
 ```
 
-The codex profile additionally applies a 300ms post-submit delay (`submit_delay_seconds: 0.3`) to give its TUI time to register the keypress. Profiles are one place to document and change vendor-specific interaction behavior later. Transcript readability is shared across agents — `read --since-mark` and `wait --from-now` normalize common terminal control sequences. For the rules on adding a new profile, see `references/wiring-internals.md`.
+OpenCode and Pi use their documented TUI defaults instead:
+
+```text
+submit: Enter
+interrupt: Escape
+eof: C-d
+escape: Escape
+clear: C-c
+```
+
+OpenCode documents `session_interrupt: escape` and `input_clear: ctrl+c` in its keybinds (`https://opencode.ai/docs/keybinds/`). Pi documents `app.interrupt: escape` and `app.clear: ctrl+c` in its keybindings (`https://pi.dev/docs/latest/keybindings`). The codex profile additionally applies a 300ms post-submit delay (`submit_delay_seconds: 0.3`) to give its TUI time to register the keypress.
+
+Profiles are one place to document and change vendor-specific interaction behavior later. Transcript readability is shared across agents — `read --since-mark` and `wait --from-now` normalize common terminal control sequences. For the rules on adding a new profile, see `references/wiring-internals.md`.

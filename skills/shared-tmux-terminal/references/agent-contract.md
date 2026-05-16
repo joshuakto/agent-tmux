@@ -44,6 +44,7 @@ When supervising another terminal agent, use events and board messages to avoid 
 Launch with native event wiring when supported:
 agent-tmux launch --session <name> --events --require-events --purpose <purpose> --run "claude --name <name>" --log
 agent-tmux launch --session <name> --events --require-events --purpose <purpose> --run "codex" --log
+agent-tmux launch --session <name> --events --require-events --purpose <purpose> --run "opencode" --log
 
 Send work:
 agent-tmux prompt <session> "<instruction; when finished or blocked, run: agent-tmux board post --topic <topic> \"concise status memo\">"
