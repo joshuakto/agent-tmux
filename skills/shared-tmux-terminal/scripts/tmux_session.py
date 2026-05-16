@@ -2344,7 +2344,7 @@ def mark_cmd(args: argparse.Namespace) -> int:
     if changed:
         save_registry_session(registry_file, registry, session_name_from_target(args.session, target))
     if getattr(args, "json", False):
-        print(json.dumps({"mark": mark_id, "target": mark["target"], "log": mark["log_path"], "offset": mark["offset"]}, sort_keys=True))
+        print(json.dumps({"mark": mark_id, "session": mark["session"], "target": mark["target"], "log": mark["log_path"], "offset": mark["offset"]}, sort_keys=True))
     else:
         print(f"mark created: {mark_id}")
         print(f"target: {mark['target']}")
@@ -2390,6 +2390,15 @@ def _resolve_consumer(args: argparse.Namespace, *, session: str | None) -> str:
     return default_consumer(session)
 
 
+def _session_from_mark(root: Path, mark_id: str | None) -> str | None:
+    if not mark_id:
+        return None
+    try:
+        return resolve_mark(root, mark_id).get("session")
+    except SystemExit:
+        return None
+
+
 def events_cmd(args: argparse.Namespace) -> int:
     root = project_root(Path(args.cwd) if args.cwd else None)
     socket = socket_path(root, getattr(args, "socket", None))
@@ -2430,10 +2439,11 @@ def events_cmd(args: argparse.Namespace) -> int:
 
     if args.events_action == "list":
         since_created_at = event_cursor_from_args(root, args)
-        consumer = _resolve_consumer(args, session=args.session) if args.unread else None
+        effective_session = args.session or _session_from_mark(root, getattr(args, "since_mark", None))
+        consumer = _resolve_consumer(args, session=effective_session) if args.unread else None
         events = list_events(
             root,
-            session=args.session,
+            session=effective_session,
             kind=resolve_kind_default(args.kind),
             topic=args.topic,
             unread=args.unread,
@@ -2451,12 +2461,13 @@ def events_cmd(args: argparse.Namespace) -> int:
 
     if args.events_action == "wait":
         since_created_at = event_cursor_from_args(root, args)
-        consumer = _resolve_consumer(args, session=args.session)
+        effective_session = args.session or _session_from_mark(root, getattr(args, "since_mark", None))
+        consumer = _resolve_consumer(args, session=effective_session)
         deadline = time.monotonic() + args.timeout
         while True:
             events = list_events(
                 root,
-                session=args.session,
+                session=effective_session,
                 kind=resolve_kind_default(args.kind),
                 topic=args.topic,
                 unread=True,
@@ -2471,7 +2482,7 @@ def events_cmd(args: argparse.Namespace) -> int:
                 return 0
             if time.monotonic() >= deadline:
                 if args.json:
-                    print(json.dumps({"timeout": True, "session": args.session}))
+                    print(json.dumps({"timeout": True, "session": effective_session}))
                 elif not args.quiet:
                     print("timeout waiting for event")
                 return 1
