@@ -23,14 +23,14 @@ Supervised worker loop. Use `agent-tmux` (or `.agent/tmux` if the wrapper is ins
 
 ```bash
 # 1. Launch (--agent inferred from --run basename; --purpose labels the session in list/report).
-agent-tmux launch --session reviewer --purpose "review" --events --require-events --run "claude --name reviewer" --log
+agent-tmux launch --session reviewer --purpose "review" --require-events --run "claude --name reviewer" --log
 
 # 2. Send task and capture mark. The task MUST end with the report-back command verbatim.
 TASK='<task>. When done or blocked, run: agent-tmux board post --topic <topic> "<concise memo>"'
 MARK=$(agent-tmux prompt reviewer "$TASK" --json | jq -r .mark)
 
-# 3. Wait for the next attention event after the mark.
-EVENT=$(agent-tmux events wait --session reviewer --since-mark "$MARK" --ack --json --timeout 1800)
+# 3. Wait for the next attention event after the mark. Session is inferred from the mark.
+EVENT=$(agent-tmux events wait --since-mark "$MARK" --ack --json --timeout 1800)
 KIND=$(echo "$EVENT" | jq -r .kind)
 
 # 4. Branch on the event kind.
