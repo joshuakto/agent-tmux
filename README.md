@@ -35,7 +35,8 @@ The wrapper is intentionally small. It forwards to `agent-tmux` and does not sto
 ## Golden Path
 
 ```bash
-agent-tmux launch --session reviewer --events --require-events --purpose review --run "claude --name reviewer" --log
+# --require-events implies event wiring; no need to also pass --events.
+agent-tmux launch --session reviewer --require-events --purpose review --run "claude --name reviewer" --log
 agent-tmux report
 agent-tmux prompt reviewer "Run tests. When finished or blocked, run: agent-tmux board post --topic review \"concise status memo\""
 agent-tmux events wait --session reviewer --since-mark <mark-id> --ack --json --timeout 1800
@@ -46,7 +47,7 @@ With the project wrapper, replace `agent-tmux` with `.agent/tmux`.
 
 `prompt` infers the agent profile from the session registry and prints the pre-send transcript mark in its receipt. `events wait` and `events list` default `--kind` to the manager attention set (`board_post,needs_input,permission_request,agent_stop,hook_error`); pass `--kind all` to widen, or an explicit comma-separated list to narrow.
 
-`--require-events` makes event wiring reliable: launch fails if native hooks cannot be wired or if the run-command binary is not resolvable on `PATH` or as an absolute executable. Wiring is session-local under `.agent/tmux.d/hooks/<session>/`; no global user settings are edited. Relative paths with separators (e.g. `./bin/claude`) are rejected — pass an absolute path or a `PATH`-resolvable name. Recognized `--run` basenames and per-vendor specifics live in `skills/shared-tmux-terminal/references/wiring-internals.md`.
+`--require-events` implies `--events` and makes event wiring reliable: launch fails if native hooks cannot be wired or if the run-command binary is not resolvable on `PATH` or as an absolute executable. Wiring is session-local under `.agent/tmux.d/hooks/<session>/`; no global user settings are edited. Relative paths with separators (e.g. `./bin/claude`) are rejected — pass an absolute path or a `PATH`-resolvable name. Use `--events` without `--require-events` only for best-effort wiring that falls back gracefully. Recognized `--run` basenames and per-vendor specifics live in `skills/shared-tmux-terminal/references/wiring-internals.md`.
 
 Events are wakeups for the manager agent. Board posts are durable memos. Neither is task truth. Branch on the returned event kind: read memos for `board_post`, inspect/ask for `needs_input` or `permission_request`, recover from `agent_stop` without a memo, and diagnose `hook_error`.
 

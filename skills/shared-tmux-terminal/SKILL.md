@@ -23,6 +23,7 @@ Supervised worker loop. Use `agent-tmux` (or `.agent/tmux` if the wrapper is ins
 
 ```bash
 # 1. Launch (--agent inferred from --run basename; --purpose labels the session in list/report).
+# --require-events implies event wiring; no need to also pass --events.
 agent-tmux launch --session reviewer --purpose "review" --require-events --run "claude --name reviewer" --log
 
 # 2. Send task and capture mark. The task MUST end with the report-back command verbatim.
@@ -44,13 +45,13 @@ esac
 ```
 
 - **Receipt JSON:** `{mark, profile, session, submitted, target}`; `.mark` is your event cursor.
-- **Event JSON:** `{id, kind, session, agent, source, summary, read_command, message_id?, topic?, path?}`; `.message_id` is set when `kind == board_post`.
+- **Event JSON:** `{id, kind, session, agent, source, summary, read_command, message_id?, topic?, path?}`; `.message_id` is set when `kind == board_post`. `.read_command` is the exact command to read event content when present — use it instead of reconstructing the command manually.
 - **Recognized `--run` basenames** (`--agent` auto-inferred): `claude`, `codex`, `opencode`, `gemini`. `--require-events` succeeds only for ones with native hooks — see `references/wiring-internals.md`.
 - The board is the report channel; the transcript is not task truth. Treat memos as reports, verify artifacts.
 
 ## Decision Rules
 
-- Continuing existing shared work: run `list` first; reuse only when there is an obvious matching live session.
+- Continuing existing shared work: run `list` first; reuse only when there is an obvious matching live session. Otherwise launch a fresh named session.
 - Need raw terminal evidence (not an event): use `read --since-mark <mark-id>`, `wait --since-mark <mark-id>`, or `search`.
 - Session seems missing or socket access fails: `list`/`status` flag `Dead but registered` for sessions killed externally. Run `doctor` for full diagnostics; do not conclude absence from a failed probe.
 - Human wants to inspect/interfere: report the no-arg `attach` command; it opens the live-session picker.
@@ -69,16 +70,7 @@ esac
 
 ## Reporting Contract
 
-After every launch or layout change, report:
-
-- project root
-- socket path
-- session name
-- direct attach command and no-arg attach picker command
-- active pane and pane list
-- compact recent output sample
-
-Keep reports compact. The goal is easy human attachment and easy agent recovery, not a full task summary.
+After every launch or layout change, run `agent-tmux report` and include the session name and attach command in your response. The goal is easy human attachment and easy agent recovery, not a full task summary.
 
 ## Runtime Notes
 
