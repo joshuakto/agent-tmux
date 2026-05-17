@@ -5,12 +5,15 @@ Use this when one agent supervises terminal agents running inside `agent-tmux`.
 ## Core Loop
 
 ```bash
-agent-tmux launch --session reviewer --events --require-events --purpose review --run "claude --name reviewer" --log
+# --require-events implies event wiring; no need to also pass --events.
+agent-tmux launch --session reviewer --require-events --purpose review --run "claude --name reviewer" --log
 agent-tmux prompt reviewer "Run the task. When finished or blocked, run: agent-tmux board post --topic review \"concise status memo\""
 agent-tmux events wait --session reviewer --since-mark <mark-id> --ack --json --timeout 1800
 ```
 
 Use `--run "codex"` for Codex CLI sessions. `--agent` is inferred for recognized binaries; pass it only to override.
+
+Use `--events` without `--require-events` only when you want best-effort hook wiring that falls back gracefully instead of failing the launch.
 
 `prompt` infers the agent profile from the session registry. At launch, `--agent` is usually inferred from recognized `--run` binaries.
 Events are small wakeups for the manager agent. Use the mark printed by `prompt` as the event cursor so stale unread events from earlier turns are ignored. Events are not task truth.
@@ -64,7 +67,7 @@ Pass `--kind all` (or an explicit list) to surface these.
 
 ## Manager Branches
 
-- `board_post`: read the memo with the event's `read_command` or `board read <message-id>`.
+- `board_post`: read the memo with `eval "$(echo "$EVENT" | jq -r .read_command)"`, or explicitly with `board read <message-id>`.
 - `needs_input`: inspect recent output or ask the human for the missing input.
 - `permission_request`: surface the decision; never auto-approve.
 - `agent_stop`: if no memo arrived, read recent output or prompt the worker to post one.
