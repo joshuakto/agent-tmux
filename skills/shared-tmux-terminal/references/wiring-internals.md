@@ -11,7 +11,7 @@ Implementation details for the native-hook wiring per vendor. Read this only whe
 | `claude` | claude | session-local `--settings <file>` |
 | `codex` | codex | session-local wrapper exec'ing `codex -c <inline-toml>` |
 | `opencode` | opencode | session-local wrapper setting `OPENCODE_CONFIG_DIR` |
-| `pi` | pi | profile-aware keys only — no native hooks |
+| `pi` | pi | session-local `--extension <file>` |
 | `gemini` | gemini | profile-aware keys only — no native hooks yet |
 
 When no recognized basename matches, `--agent` defaults to the `generic` profile (aliases: `shell`, `bash`, `zsh`, `terminal`). `generic` provides the standard key actions but does not wire native hooks. Pass `--agent generic` explicitly when the run binary is a custom shell or REPL.
@@ -24,13 +24,13 @@ To add another binary, add a row to `RUN_BINARY_TO_PROFILE` in `tmux_session.py`
 
 | Vendor event | Canonical kind |
 | --- | --- |
-| `Stop`, `SubagentStop`, `AfterAgent` | `agent_stop` |
+| `Stop`, `SubagentStop`, `AfterAgent`, `agent_end` | `agent_stop` |
 | `StopFailure`, `session.error` | `hook_error` |
 | `Notification` | `needs_input` |
 | `PermissionRequest`, `permission.asked` | `permission_request` |
 | `session.idle` | `agent_stop` |
 | `SessionStart` | `session_started` |
-| `UserPromptSubmit` | `prompt_submitted` |
+| `UserPromptSubmit`, `input` | `prompt_submitted` |
 | `PreToolUse`, `PostToolUse` | `tool_event` |
 | anything else | `agent_event` |
 
@@ -94,9 +94,27 @@ OpenCode loads local JavaScript/TypeScript plugins from config plugin directorie
 
 OpenCode introduces vendor-loaded generated code. Claude and Codex artifacts are settings/config plus wrappers invoked by `agent-tmux`; OpenCode loads `agent-tmux.js` in the vendor runtime. Keep that bridge tiny, dependency-free, and observer-only so a bridge bug can at worst lose or report hook events rather than alter the agent's decisions.
 
-## Pi CLI and Gemini CLI
+## Pi CLI
 
-These profiles currently provide prompt/action key behavior only. They do not write hook files or rewrite the run command for native event ingestion. `--events --require-events --run "pi ..."` fails clearly as unsupported native hooks. Use transcript reads and board memos as the reliable supervision path until the CLI exposes a stable event surface that maps cleanly without adding a generated extension path.
+Files written:
+
+```text
+.agent/tmux.d/hooks/<session>/pi-agent-tmux-extension.ts
+```
+
+Run command rewrite:
+
+```bash
+pi ...  →  pi --extension .agent/tmux.d/hooks/<session>/pi-agent-tmux-extension.ts ...
+```
+
+Wired events: `input`, `agent_end`. The generated extension only observes interactive input and agent completion, then synchronously invokes `hooks ingest --quiet`; it does not register tools, commands, UI, keybindings, permission handlers, or message transforms. Explicit `--extension` values supplied by the user can co-exist with the session-local agent-tmux extension; agent-tmux injects its observer extension first and preserves the user's remaining arguments. `--no-extensions` disables discovery only; Pi still documents `--no-extensions -e ./my-extension.ts` as supported, so the explicit session-local extension remains loadable.
+
+Pi introduces vendor-loaded generated code. Keep the bridge tiny, dependency-free, and observer-only so a bridge bug can at worst lose or report hook events rather than alter the agent's decisions.
+
+## Gemini CLI
+
+This profile currently provides prompt/action key behavior only. It does not write hook files or rewrite the run command for native event ingestion. `--events --require-events --run "gemini ..."` fails clearly as unsupported native hooks. Use transcript reads and board memos as the reliable supervision path until the CLI exposes a stable event surface that maps cleanly.
 
 ## Adding a New Vendor
 
