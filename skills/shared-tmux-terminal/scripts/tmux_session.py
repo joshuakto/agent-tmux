@@ -71,12 +71,23 @@ AGENT_PROFILES: dict[str, dict[str, Any]] = {
         "aliases": ["opencode-cli"],
         "actions": {
             "submit": ["Enter"],
-            "interrupt": ["C-c"],
+            "interrupt": ["Escape"],
             "eof": ["C-d"],
             "escape": ["Escape"],
-            "clear": ["C-l"],
+            "clear": ["C-c"],
         },
         "notes": "opencode CLI profile. Use prompt for user-message style input.",
+    },
+    "pi": {
+        "aliases": ["pi-coding-agent"],
+        "actions": {
+            "submit": ["Enter"],
+            "interrupt": ["Escape"],
+            "eof": ["C-d"],
+            "escape": ["Escape"],
+            "clear": ["C-c"],
+        },
+        "notes": "Pi coding agent profile. Use prompt for user-message style input.",
     },
 }
 
@@ -683,7 +694,7 @@ def list_board_messages(root: Path, *, topic: str | None = None) -> list[dict[st
     return sorted(messages, key=lambda message: (message["created_at"], message["id"]))
 
 
-def hook_ingest_command(root: Path, agent: str, session: str, *, quiet: bool = False) -> str:
+def hook_ingest_argv(root: Path, agent: str, session: str, *, quiet: bool = False) -> list[str]:
     exe = Path(__file__).resolve()
     parts = [
         str(exe),
@@ -698,7 +709,11 @@ def hook_ingest_command(root: Path, agent: str, session: str, *, quiet: bool = F
     ]
     if quiet:
         parts.append("--quiet")
-    return " ".join(shlex.quote(part) for part in parts)
+    return parts
+
+
+def hook_ingest_command(root: Path, agent: str, session: str, *, quiet: bool = False) -> str:
+    return " ".join(shlex.quote(part) for part in hook_ingest_argv(root, agent, session, quiet=quiet))
 
 
 def claude_hook_settings(root: Path, session: str) -> dict[str, Any]:
@@ -737,6 +752,49 @@ def codex_hooks_toml(root: Path, session: str, trust_state: dict[str, str] | Non
         ]
         entries.append("state={" + ",".join(state_entries) + "}")
     return "hooks={" + ",".join(entries) + "}"
+
+
+def opencode_plugin_js(root: Path, session: str) -> str:
+    ingest_argv = json.dumps(hook_ingest_argv(root, "opencode", session, quiet=True))
+    return "\n".join(
+        [
+            'import { spawnSync } from "node:child_process";',
+            "",
+            f"const INGEST = {ingest_argv};",
+            'const MAPPED_EVENTS = new Set(["session.idle", "permission.asked", "session.error"]);',
+            "",
+            "function summary(event) {",
+            "  return event?.error?.message || event?.message || event?.reason || event?.type || \"opencode event\";",
+            "}",
+            "",
+            "function emit(event) {",
+            "  const payload = {",
+            "    hook_event_name: event?.type,",
+            "    event: event?.type,",
+            "    message: summary(event),",
+            "    session_id: event?.sessionID || event?.sessionId || event?.session?.id,",
+            "    cwd: event?.cwd,",
+            "  };",
+            "  try {",
+            "    spawnSync(INGEST[0], INGEST.slice(1), {",
+            "      input: JSON.stringify(payload),",
+            "      encoding: \"utf8\",",
+            "      stdio: [\"pipe\", \"ignore\", \"ignore\"],",
+            "    });",
+            "  } catch {",
+            "    // Observer hook only: never break the OpenCode session.",
+            "  }",
+            "}",
+            "",
+            "export const AgentTmuxPlugin = async () => ({",
+            "  event: async ({ event }) => {",
+            "    if (!event || !MAPPED_EVENTS.has(event.type)) return;",
+            "    emit(event);",
+            "  },",
+            "});",
+            "",
+        ]
+    )
 
 
 def codex_app_server_hooks_list(
@@ -880,7 +938,12 @@ def write_hook_settings(
         config_path = hooks_dir(root, session) / "codex-hooks.toml"
         atomic_write_text(config_path, config_value + "\n")
         return config_path, status, warning, hook_config
-    return None, "unsupported-agent", f"native hook wiring is not implemented for agent profile: {profile_name}", {}
+    if profile_name == "opencode":
+        config_dir = hooks_dir(root, session) / "opencode-config"
+        plugin_path = config_dir / "plugins" / "agent-tmux.js"
+        atomic_write_text(plugin_path, opencode_plugin_js(root, session))
+        return config_dir, "native-hook", None, {"mode": "opencode-plugin", "plugin_path": str(plugin_path)}
+    return None, "unsupported-agent", f"{profile_name} profile is supported, but native event hooks are not implemented", {"mode": "profile-only"}
 
 
 def _binary_resolvable(token: str) -> tuple[bool, str | None]:
@@ -904,6 +967,7 @@ RUN_BINARY_TO_PROFILE: dict[str, str] = {
     "codex": "codex",
     "opencode": "opencode",
     "gemini": "gemini",
+    "pi": "pi",
 }
 
 
@@ -939,6 +1003,72 @@ def registry_launch_spec(entry: dict[str, Any]) -> dict[str, Any]:
         "log": bool(entry.get("logs")),
         "log_output": None,
     }
+
+
+def event_status_summary(events_info: dict[str, Any]) -> str:
+    status = str(events_info.get("status") or "not configured")
+    mode = events_info.get("mode")
+    if mode:
+        status = f"{status} ({mode})"
+    if events_info.get("run_wired") is False:
+        status = f"{status}; run not wired"
+    return status
+
+
+def event_path_label(events_info: dict[str, Any]) -> str:
+    mode = events_info.get("mode")
+    if mode == "settings-file":
+        return "hook settings"
+    if mode == "wrapper-cli-config":
+        return "hook config"
+    if mode == "opencode-plugin":
+        return "hook config dir"
+    return "hook path"
+
+
+def path_status(path_value: str, *, check: bool = False) -> str:
+    if not check:
+        return path_value
+    path = Path(path_value)
+    return f"{path} ({'exists' if path.exists() else 'missing'})"
+
+
+def print_event_readiness(events_info: dict[str, Any], *, prefix: str = "", include_agent: bool = True, check_paths: bool = False) -> None:
+    print(f"{prefix}events: {event_status_summary(events_info)}")
+    if include_agent and events_info.get("agent"):
+        suffix = " (inferred from --run)" if events_info.get("agent_inferred_from_run") else ""
+        print(f"{prefix}agent: {events_info['agent']}{suffix}")
+    if events_info.get("settings_path"):
+        print(f"{prefix}{event_path_label(events_info)}: {path_status(str(events_info['settings_path']), check=check_paths)}")
+    if events_info.get("plugin_path"):
+        print(f"{prefix}hook plugin: {path_status(str(events_info['plugin_path']), check=check_paths)}")
+    if events_info.get("wrapper_path"):
+        print(f"{prefix}hook wrapper: {path_status(str(events_info['wrapper_path']), check=check_paths)}")
+    if events_info.get("trust"):
+        suffix = ""
+        if events_info.get("trusted_hooks"):
+            suffix = f" ({', '.join(events_info['trusted_hooks'])})"
+        print(f"{prefix}hook trust: {events_info['trust']}{suffix}")
+        if events_info.get("trust_error"):
+            print(f"{prefix}  trust error: {events_info['trust_error']}")
+    readiness = events_info.get("codex_readiness") or events_info.get("hook_readiness")
+    if readiness:
+        state = readiness.get("state", "unknown")
+        suffix_parts = []
+        if readiness.get("elapsed_seconds") is not None:
+            suffix_parts.append(f"checked {readiness['elapsed_seconds']}s")
+        if readiness.get("detected_at"):
+            suffix_parts.append(f"at {readiness['detected_at']}")
+        suffix = f" ({'; '.join(suffix_parts)})" if suffix_parts else ""
+        print(f"{prefix}hook readiness: {state}{suffix}")
+        if readiness.get("trusted_hooks"):
+            print(f"{prefix}  trusted hooks: {', '.join(readiness['trusted_hooks'])}")
+    seen_warnings: set[str] = set()
+    for key in ("warning", "run_warning"):
+        warning = events_info.get(key)
+        if warning and warning not in seen_warnings:
+            seen_warnings.add(str(warning))
+            print(f"{prefix}warning: {warning}")
 
 
 def build_launch_spec(
@@ -1034,6 +1164,41 @@ def wire_codex_run_command(root: Path, session: str, run: str | None, config_pat
     wrapper_path = write_codex_wrapper(root, session, tokens[0], config_path)
     tokens[0] = str(wrapper_path)
     return shlex.join(tokens), True, None
+
+
+def run_has_opencode_pure(tokens: list[str]) -> bool:
+    return any(token == "--pure" or token.startswith("--pure=") for token in tokens[1:])
+
+
+def write_opencode_wrapper(root: Path, session: str, opencode_program: str, config_dir: Path) -> Path:
+    wrapper_path = hooks_dir(root, session) / "opencode-with-hooks"
+    script = "\n".join(
+        [
+            "#!/usr/bin/env bash",
+            "set -euo pipefail",
+            f"export OPENCODE_CONFIG_DIR={shlex.quote(str(config_dir))}",
+            f"exec {shlex.quote(opencode_program)} \"$@\"",
+            "",
+        ]
+    )
+    atomic_write_text(wrapper_path, script)
+    wrapper_path.chmod(0o755)
+    return wrapper_path
+
+
+def wire_opencode_run_command(root: Path, session: str, run: str | None, config_dir: Path | None) -> tuple[str | None, bool, str | None, str | None]:
+    if not config_dir:
+        return run, False, "no OpenCode hooks config directory", None
+    tokens, error = parse_run_for_wiring(run, "opencode")
+    if tokens is None:
+        return run, False, error, None
+    if run_has_opencode_pure(tokens):
+        return run, False, "opencode --pure disables external plugins", None
+    if os.environ.get("OPENCODE_CONFIG_DIR"):
+        return run, False, "OPENCODE_CONFIG_DIR is already set; refusing to replace user custom config directory", None
+    wrapper_path = write_opencode_wrapper(root, session, tokens[0], config_dir)
+    tokens[0] = str(wrapper_path)
+    return shlex.join(tokens), True, None, str(wrapper_path)
 
 
 def session_exists(socket: Path, session: str) -> bool:
@@ -1595,19 +1760,8 @@ def print_report(root: Path, socket: Path, registry: dict[str, Any], *, lines: i
         print(f"  attach: {user_command(root, f'attach {name}')}")
         print(f"  tmux attach: tmux -S {socket} attach -t {name}")
         events_info = reg.get("events") or {}
-        if events_info.get("trust"):
-            trust_suffix = ""
-            if events_info.get("trusted_hooks"):
-                trust_suffix = f" ({', '.join(events_info['trusted_hooks'])})"
-            print(f"  codex hook trust: {events_info['trust']}{trust_suffix}")
-        readiness = events_info.get("codex_readiness") or {}
-        if readiness:
-            state = readiness.get("state", "unknown")
-            print(f"  codex hook readiness: {state}")
-            if state == "trusted-inline-session-state":
-                hooks = readiness.get("trusted_hooks") or []
-                if hooks:
-                    print(f"    trusted hooks: {', '.join(hooks)}")
+        if events_info:
+            print_event_readiness(events_info, prefix="  ")
         print("  panes:")
         for pane in panes:
             marker = "*" if pane["active"] else " "
@@ -1710,7 +1864,6 @@ def launch(args: argparse.Namespace) -> int:
         run_delay = float(stored_spec["run_delay"])
 
     events_info: dict[str, Any] | None = None
-    hook_warning: str | None = None
     agent_inferred_from_run = False
     if not agent:
         inferred = infer_profile_from_run(run_original)
@@ -1719,8 +1872,7 @@ def launch(args: argparse.Namespace) -> int:
             agent_inferred_from_run = True
     if events_requested:
         if not agent:
-            events_info = {"requested": True, "status": "missing-agent", "warning": "pass --agent or use a hook-capable --run binary (claude, codex) to enable native hook wiring"}
-            hook_warning = events_info["warning"]
+            events_info = {"requested": True, "status": "missing-agent", "warning": "pass --agent or use a native-hook --run binary (claude, codex, opencode) to enable event wiring"}
         else:
             profile_name = resolve_profile(agent)[0]
             codex_program = "codex"
@@ -1741,6 +1893,8 @@ def launch(args: argparse.Namespace) -> int:
                 events_info["settings_path"] = str(settings_path)
             for key in (
                 "mode",
+                "config_path",
+                "plugin_path",
                 "trust",
                 "trusted_hooks",
                 "trusted_hook_count",
@@ -1750,12 +1904,15 @@ def launch(args: argparse.Namespace) -> int:
                     events_info[key] = hook_config[key]
             if warning:
                 events_info["warning"] = warning
-                hook_warning = warning
             if settings_path is not None:
                 if events_info["agent"] == "claude":
                     effective_run, wired, run_warning = wire_claude_run_command(run_original, settings_path)
                 elif events_info["agent"] == "codex":
                     effective_run, wired, run_warning = wire_codex_run_command(root, session, run_original, settings_path)
+                elif events_info["agent"] == "opencode":
+                    effective_run, wired, run_warning, wrapper_path = wire_opencode_run_command(root, session, run_original, settings_path)
+                    if wrapper_path:
+                        events_info["wrapper_path"] = wrapper_path
                 else:
                     wired, run_warning = False, f"native hook run wiring is not implemented for agent profile: {events_info['agent']}"
                 events_info["run_wired"] = wired
@@ -1763,7 +1920,6 @@ def launch(args: argparse.Namespace) -> int:
                     events_info["prompt_submit_hook"] = True
                 if run_warning:
                     events_info["run_warning"] = run_warning
-                    hook_warning = run_warning
     if require_events:
         if not events_info:
             raise SystemExit("--require-events needs --events and --agent")
@@ -1885,34 +2041,7 @@ def launch(args: argparse.Namespace) -> int:
     if log_path:
         print(f"log: {log_path}")
     if events_info is not None:
-        print(f"events: {events_info.get('status')}")
-        if events_info.get("agent_inferred_from_run"):
-            print(f"agent: {events_info.get('agent')} (inferred from --run)")
-        if events_info.get("mode"):
-            print(f"event mode: {events_info['mode']}")
-        if events_info.get("settings_path"):
-            label = "hook settings" if events_info.get("mode") == "settings-file" else "hook config"
-            print(f"{label}: {events_info['settings_path']}")
-        if events_info.get("trust"):
-            trust = events_info["trust"]
-            suffix = ""
-            if events_info.get("trusted_hooks"):
-                suffix = f" ({', '.join(events_info['trusted_hooks'])})"
-            print(f"codex hook trust: {trust}{suffix}")
-            if events_info.get("trust_error"):
-                print(f"  trust error: {events_info['trust_error']}")
-        readiness = events_info.get("codex_readiness")
-        if readiness:
-            state = readiness.get("state", "unknown")
-            elapsed = readiness.get("elapsed_seconds")
-            elapsed_str = f" after {elapsed}s" if elapsed is not None else ""
-            print(f"codex hook readiness: {state}{elapsed_str}")
-            if state == "trusted-inline-session-state":
-                hooks = readiness.get("trusted_hooks") or []
-                if hooks:
-                    print(f"  trusted hooks: {', '.join(hooks)}")
-        if hook_warning:
-            print(f"hook warning: {hook_warning}")
+        print_event_readiness(events_info)
     elif agent_inferred_from_run:
         print(f"agent: {agent} (inferred from --run)")
     print(f"windows: {len({pane['window_index'] for pane in panes})}  panes: {len(panes)}")
@@ -2030,21 +2159,8 @@ def status_cmd(args: argparse.Namespace) -> int:
     print(f"Attach picker: {user_command(root, 'attach')}")
     print(f"Tmux attach: tmux -S {socket} attach -t {session}")
     events_info = reg.get("events") or {}
-    if events_info.get("trust"):
-        trust_suffix = ""
-        if events_info.get("trusted_hooks"):
-            trust_suffix = f" ({', '.join(events_info['trusted_hooks'])})"
-        print(f"Codex hook trust: {events_info['trust']}{trust_suffix}")
-        if events_info.get("trust_error"):
-            print(f"  Trust error: {events_info['trust_error']}")
-    readiness = events_info.get("codex_readiness") or {}
-    if readiness:
-        state = readiness.get("state", "unknown")
-        print(f"Codex hook readiness: {state}")
-        if state == "trusted-inline-session-state":
-            hooks = readiness.get("trusted_hooks") or []
-            if hooks:
-                print(f"  Trusted hooks: {', '.join(hooks)}")
+    if events_info:
+        print_event_readiness(events_info)
     print(f"Windows: {sess['windows'] if sess else len({p['window_index'] for p in panes})}")
     for pane in panes:
         marker = "*" if pane["active"] else " "
@@ -2344,7 +2460,7 @@ def mark_cmd(args: argparse.Namespace) -> int:
     if changed:
         save_registry_session(registry_file, registry, session_name_from_target(args.session, target))
     if getattr(args, "json", False):
-        print(json.dumps({"mark": mark_id, "target": mark["target"], "log": mark["log_path"], "offset": mark["offset"]}, sort_keys=True))
+        print(json.dumps({"mark": mark_id, "session": mark["session"], "target": mark["target"], "log": mark["log_path"], "offset": mark["offset"]}, sort_keys=True))
     else:
         print(f"mark created: {mark_id}")
         print(f"target: {mark['target']}")
@@ -2390,6 +2506,25 @@ def _resolve_consumer(args: argparse.Namespace, *, session: str | None) -> str:
     return default_consumer(session)
 
 
+def _session_from_mark(root: Path, mark_id: str | None) -> str | None:
+    if not mark_id:
+        return None
+    try:
+        return resolve_mark(root, mark_id).get("session")
+    except SystemExit:
+        return None
+
+
+def event_effective_session(root: Path, args: argparse.Namespace) -> str | None:
+    if getattr(args, "all_sessions", False):
+        if getattr(args, "session", None):
+            raise SystemExit("--all-sessions cannot be combined with --session")
+        if not getattr(args, "since_mark", None):
+            raise SystemExit("--all-sessions requires --since-mark")
+        return None
+    return getattr(args, "session", None) or _session_from_mark(root, getattr(args, "since_mark", None))
+
+
 def events_cmd(args: argparse.Namespace) -> int:
     root = project_root(Path(args.cwd) if args.cwd else None)
     socket = socket_path(root, getattr(args, "socket", None))
@@ -2430,10 +2565,11 @@ def events_cmd(args: argparse.Namespace) -> int:
 
     if args.events_action == "list":
         since_created_at = event_cursor_from_args(root, args)
-        consumer = _resolve_consumer(args, session=args.session) if args.unread else None
+        effective_session = event_effective_session(root, args)
+        consumer = _resolve_consumer(args, session=effective_session) if args.unread else None
         events = list_events(
             root,
-            session=args.session,
+            session=effective_session,
             kind=resolve_kind_default(args.kind),
             topic=args.topic,
             unread=args.unread,
@@ -2451,12 +2587,13 @@ def events_cmd(args: argparse.Namespace) -> int:
 
     if args.events_action == "wait":
         since_created_at = event_cursor_from_args(root, args)
-        consumer = _resolve_consumer(args, session=args.session)
+        effective_session = event_effective_session(root, args)
+        consumer = _resolve_consumer(args, session=effective_session)
         deadline = time.monotonic() + args.timeout
         while True:
             events = list_events(
                 root,
-                session=args.session,
+                session=effective_session,
                 kind=resolve_kind_default(args.kind),
                 topic=args.topic,
                 unread=True,
@@ -2471,7 +2608,7 @@ def events_cmd(args: argparse.Namespace) -> int:
                 return 0
             if time.monotonic() >= deadline:
                 if args.json:
-                    print(json.dumps({"timeout": True, "session": args.session}))
+                    print(json.dumps({"timeout": True, "session": effective_session}))
                 elif not args.quiet:
                     print("timeout waiting for event")
                 return 1
@@ -2604,13 +2741,13 @@ def hook_kind(agent: str, payload: dict[str, Any]) -> tuple[str, str]:
     event_name = str(payload.get("hook_event_name") or payload.get("event") or payload.get("type") or "")
     event_lower = re.sub(r"[^a-z0-9]+", "", event_name.lower())
     message = str(payload.get("message") or payload.get("reason") or payload.get("tool_name") or "").strip()
-    if event_lower in {"stop", "subagentstop", "afteragent"}:
+    if event_lower in {"stop", "subagentstop", "afteragent", "sessionidle"}:
         return "agent_stop", message or f"{agent} turn ended"
-    if event_lower in {"stopfailure"}:
+    if event_lower in {"stopfailure", "sessionerror"}:
         return "hook_error", message or f"{agent} stop hook failure"
     if event_lower in {"notification"}:
         return "needs_input", message or f"{agent} notification"
-    if event_lower in {"permissionrequest"}:
+    if event_lower in {"permissionrequest", "permissionasked"}:
         return "permission_request", message or f"{agent} permission request"
     if event_lower in {"sessionstart"}:
         return "session_started", message or f"{agent} session started"
@@ -2664,49 +2801,20 @@ def hooks_cmd(args: argparse.Namespace) -> int:
         if profile_name == "codex":
             print(codex_hooks_toml(root, args.session))
             return 0
-        raise SystemExit(f"show-config is only implemented for claude and codex, not {profile_name}")
+        if profile_name == "opencode":
+            print(opencode_plugin_js(root, args.session))
+            return 0
+        raise SystemExit(f"show-config is only implemented for claude, codex, and opencode, not {profile_name}")
 
     if args.hooks_action == "status":
         registry = load_registry(registry_path(root))
         reg = registry.get("sessions", {}).get(args.session, {})
         events_info = reg.get("events") or {}
         print(f"Session: {args.session}")
-        print(f"Events: {events_info.get('status', 'not configured')}")
-        if events_info.get("agent"):
-            print(f"Agent: {events_info['agent']}")
-        if events_info.get("mode"):
-            print(f"Mode: {events_info['mode']}")
-        if events_info.get("settings_path"):
-            path = Path(events_info["settings_path"])
-            label = "Settings" if events_info.get("mode") == "settings-file" else "Config"
-            print(f"{label}: {path} ({'exists' if path.exists() else 'missing'})")
-        if events_info.get("trust"):
-            trust_suffix = ""
-            if events_info.get("trusted_hooks"):
-                trust_suffix = f" ({', '.join(events_info['trusted_hooks'])})"
-            print(f"Codex hook trust: {events_info['trust']}{trust_suffix}")
-            if events_info.get("trust_error"):
-                print(f"  Trust error: {events_info['trust_error']}")
-        readiness = events_info.get("codex_readiness")
-        if readiness:
-            state = readiness.get("state", "unknown")
-            elapsed = readiness.get("elapsed_seconds")
-            detected_at = readiness.get("detected_at")
-            suffix_parts = []
-            if elapsed is not None:
-                suffix_parts.append(f"checked {elapsed}s")
-            if detected_at:
-                suffix_parts.append(f"at {detected_at}")
-            suffix = f" ({'; '.join(suffix_parts)})" if suffix_parts else ""
-            print(f"Codex hook readiness: {state}{suffix}")
-            if state == "trusted-inline-session-state":
-                hooks = readiness.get("trusted_hooks") or []
-                if hooks:
-                    print(f"  Trusted hooks: {', '.join(hooks)}")
-        if events_info.get("warning"):
-            print(f"Warning: {events_info['warning']}")
-        if events_info.get("run_warning"):
-            print(f"Run warning: {events_info['run_warning']}")
+        if events_info:
+            print_event_readiness(events_info, check_paths=True)
+        else:
+            print("events: not configured")
         return 0
 
     raise SystemExit(f"unknown hooks action: {args.hooks_action}")
@@ -3091,7 +3199,7 @@ def parser() -> argparse.ArgumentParser:
     launch_cmd.add_argument("--session", help="Session name to create or reuse")
     launch_cmd.add_argument("--purpose", help="Short purpose label stored in the registry")
     launch_cmd.add_argument("--run", help="Literal command to send after launch")
-    launch_cmd.add_argument("--agent", help="Agent profile for the launched process, e.g. claude, codex, opencode, gemini")
+    launch_cmd.add_argument("--agent", help="Agent profile for the launched process, e.g. claude, codex, opencode, pi, gemini")
     launch_cmd.add_argument("--events", action="store_true", help="Enable native event hook wiring for supported agents")
     launch_cmd.add_argument("--require-events", action="store_true", help="Fail launch unless native event hook wiring is verified")
     launch_cmd.add_argument("--run-delay", type=float, default=0.5, help="Seconds to wait before sending --run to a newly started shell")
@@ -3199,7 +3307,7 @@ def parser() -> argparse.ArgumentParser:
     prompt.add_argument("session")
     prompt.add_argument("text")
     prompt.add_argument("--pane", help="Explicit pane target, e.g. session:0.0")
-    prompt.add_argument("--agent", help="Agent profile (claude, codex, opencode, gemini, generic). Inferred from the session registry if omitted.")
+    prompt.add_argument("--agent", help="Agent profile (claude, codex, opencode, pi, gemini, generic). Inferred from the session registry if omitted.")
     prompt.add_argument("--no-submit", dest="submit", action="store_false", help="Paste text but do not submit")
     prompt.add_argument("--no-mark", dest="mark", action="store_false", help="Do not create a transcript mark before sending")
     prompt.add_argument("--mark-label", help="Optional label for the pre-send mark")
@@ -3218,7 +3326,7 @@ def parser() -> argparse.ArgumentParser:
     action.add_argument("session")
     action.add_argument("action", help="Profile action, e.g. submit, interrupt, eof, escape, clear")
     action.add_argument("--pane", help="Explicit pane target, e.g. session:0.0")
-    action.add_argument("--agent", help="Agent profile (claude, codex, opencode, gemini, generic). Inferred from the session registry if omitted.")
+    action.add_argument("--agent", help="Agent profile (claude, codex, opencode, pi, gemini, generic). Inferred from the session registry if omitted.")
     action.add_argument("--quiet", action="store_true")
     action.set_defaults(func=action_cmd)
 
@@ -3252,6 +3360,7 @@ def parser() -> argparse.ArgumentParser:
     events_list.add_argument("--unread", action="store_true", help="Only show events not acked by this consumer")
     events_list.add_argument("--consumer", help="Consumer name for unread filtering")
     events_list.add_argument("--since-mark", help="Only show events created after a transcript mark")
+    events_list.add_argument("--all-sessions", action="store_true", help="With --since-mark, include events from any session after that mark")
     events_list.add_argument("--from-now", action="store_true", help="Only show events created after invocation")
     events_list.add_argument("--limit", type=int, default=50)
     events_list.add_argument("--json", action="store_true")
@@ -3270,6 +3379,7 @@ def parser() -> argparse.ArgumentParser:
     events_wait.add_argument("--interval", type=float, default=0.5)
     events_wait.add_argument("--consumer", help="Consumer name for unread filtering")
     events_wait.add_argument("--since-mark", help="Wait only for events created after a transcript mark")
+    events_wait.add_argument("--all-sessions", action="store_true", help="With --since-mark, wait for events from any session after that mark")
     events_wait.add_argument("--from-now", action="store_true", help="Wait only for events created after invocation")
     events_wait.add_argument("--ack", action="store_true", help="Ack the event before returning")
     events_wait.add_argument("--json", action="store_true")

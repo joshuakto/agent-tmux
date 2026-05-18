@@ -22,6 +22,8 @@ For long memos, prefer `--body-file` or stdin over a shell-quoted one-liner.
 .agent/board/threads/<topic>/<message-id>.md
 ```
 
+Topic names are slugified on disk: lowercased, spaces and non-alphanumeric characters replaced with hyphens. `"My Review"` becomes `my-review`.
+
 Rules:
 
 - One message per file.

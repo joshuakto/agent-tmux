@@ -10,8 +10,11 @@ Implementation details for the native-hook wiring per vendor. Read this only whe
 | --- | --- | --- |
 | `claude` | claude | session-local `--settings <file>` |
 | `codex` | codex | session-local wrapper exec'ing `codex -c <inline-toml>` |
-| `opencode` | opencode | profile-aware keys only — no native hooks yet |
+| `opencode` | opencode | session-local wrapper setting `OPENCODE_CONFIG_DIR` |
+| `pi` | pi | profile-aware keys only — no native hooks |
 | `gemini` | gemini | profile-aware keys only — no native hooks yet |
+
+When no recognized basename matches, `--agent` defaults to the `generic` profile (aliases: `shell`, `bash`, `zsh`, `terminal`). `generic` provides the standard key actions but does not wire native hooks. Pass `--agent generic` explicitly when the run binary is a custom shell or REPL.
 
 To add another binary, add a row to `RUN_BINARY_TO_PROFILE` in `tmux_session.py` and follow the "Adding a New Vendor" checklist below.
 
@@ -22,13 +25,16 @@ To add another binary, add a row to `RUN_BINARY_TO_PROFILE` in `tmux_session.py`
 | Vendor event | Canonical kind |
 | --- | --- |
 | `Stop`, `SubagentStop`, `AfterAgent` | `agent_stop` |
-| `StopFailure` | `hook_error` |
+| `StopFailure`, `session.error` | `hook_error` |
 | `Notification` | `needs_input` |
-| `PermissionRequest` | `permission_request` |
+| `PermissionRequest`, `permission.asked` | `permission_request` |
+| `session.idle` | `agent_stop` |
 | `SessionStart` | `session_started` |
 | `UserPromptSubmit` | `prompt_submitted` |
 | `PreToolUse`, `PostToolUse` | `tool_event` |
 | anything else | `agent_event` |
+
+`AfterAgent` is handled by `hooks ingest` if received, but is not currently wired in the Claude or Codex settings files. The Claude Code section below lists the events actually wired.
 
 ## Claude Code
 
@@ -63,11 +69,34 @@ codex ...  →  .agent/tmux.d/hooks/<session>/codex-with-hooks ...
 
 The wrapper exec's `codex -c "$(cat .agent/tmux.d/hooks/<session>/codex-hooks.toml)" ...`. The TOML is a single inline `hooks={Stop=[...],PermissionRequest=[...],UserPromptSubmit=[...]}` table. `SessionStart` is not wired — `launch` already emits `session_started`/`session_reused`/`session_recovered`. `UserPromptSubmit` is wired for prompt delivery confirmation, not as a manager attention event.
 
-Codex requires hook trust. `agent-tmux` runs `codex app-server -c <config>` and exchanges `initialize` + `hooks/list` messages to capture each hook's `currentHash`, then re-launches Codex with `state={<key>={trusted_hash=...}}` injected so the session sees them as trusted. If trust verification fails, the launch falls back to an unverified config and surfaces `codex hook trust: unverified` in the report.
+Codex requires hook trust. `agent-tmux` runs `codex app-server -c <config>` and exchanges `initialize` + `hooks/list` messages to capture each hook's `currentHash`, then re-launches Codex with `state={<key>={trusted_hash=...}}` injected so the session sees them as trusted. If trust verification fails, the launch falls back to an unverified config and surfaces `hook trust: unverified` in the report.
 
-## opencode CLI and Gemini CLI
+## OpenCode CLI
 
-These profiles currently provide prompt/action key behavior only. They do not write hook files or rewrite the run command for native event ingestion. Use transcript reads and board memos as the reliable supervision path until the CLI exposes a stable event surface that maps cleanly to `agent_stop`, `needs_input`, and `permission_request`.
+Files written:
+
+```text
+.agent/tmux.d/hooks/<session>/opencode-config/plugins/agent-tmux.js
+.agent/tmux.d/hooks/<session>/opencode-with-hooks
+```
+
+Run command rewrite:
+
+```bash
+opencode ...  →  .agent/tmux.d/hooks/<session>/opencode-with-hooks ...
+```
+
+The wrapper sets `OPENCODE_CONFIG_DIR` to the session-local config directory, then execs the original `opencode` binary. `agent-tmux` refuses native event wiring when `--run` contains `--pure`, because OpenCode documents that flag as "Run without external plugins." It also refuses to replace a parent `OPENCODE_CONFIG_DIR`; that avoids silently dropping a user's custom config directory.
+
+Wired events: `session.idle`, `permission.asked`, `session.error`. The generated plugin only observes events and synchronously invokes `hooks ingest --quiet`; it does not approve permissions, register tools, or change OpenCode behavior.
+
+OpenCode loads local JavaScript/TypeScript plugins from config plugin directories, and config/plugin sources can co-exist with user project/global config. `agent-tmux` does not edit project `.opencode/` or global OpenCode config. If a user plugin also runs, it is OpenCode's normal plugin model, not a separate agent-tmux setup step.
+
+OpenCode introduces vendor-loaded generated code. Claude and Codex artifacts are settings/config plus wrappers invoked by `agent-tmux`; OpenCode loads `agent-tmux.js` in the vendor runtime. Keep that bridge tiny, dependency-free, and observer-only so a bridge bug can at worst lose or report hook events rather than alter the agent's decisions.
+
+## Pi CLI and Gemini CLI
+
+These profiles currently provide prompt/action key behavior only. They do not write hook files or rewrite the run command for native event ingestion. `--events --require-events --run "pi ..."` fails clearly as unsupported native hooks. Use transcript reads and board memos as the reliable supervision path until the CLI exposes a stable event surface that maps cleanly without adding a generated extension path.
 
 ## Adding a New Vendor
 
