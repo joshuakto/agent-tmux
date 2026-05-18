@@ -5,12 +5,13 @@ Use this when one agent supervises terminal agents running inside `agent-tmux`.
 ## Core Loop
 
 ```bash
-agent-tmux launch --session reviewer --events --require-events --purpose review --run "claude --name reviewer" --log
+agent-tmux launch --session reviewer --require-events --purpose review --run "claude --name reviewer" --log
 agent-tmux prompt reviewer "Run the task. When finished or blocked, run: agent-tmux board post --topic review \"concise status memo\""
-agent-tmux events wait --session reviewer --since-mark <mark-id> --ack --json --timeout 1800
+agent-tmux events wait --since-mark <mark-id> --ack --json --timeout 1800
 ```
 
 Use the same command shape for native-hook CLIs such as `--run "codex"` or `--run "opencode"`. `--agent` is inferred for recognized binaries; pass it only to override.
+With `--since-mark`, session is inferred from the mark. Add `--all-sessions` only when you need the next event from any session after that mark.
 
 `prompt` infers the agent profile from the session registry. At launch, `--agent` is usually inferred from recognized `--run` binaries.
 Events are small wakeups for the manager agent. Use the mark printed by `prompt` as the event cursor so stale unread events from earlier turns are ignored. Events are not task truth.
@@ -30,12 +31,13 @@ To widen, pass `--kind all`. To narrow, pass an explicit comma-separated list (e
 ```bash
 agent-tmux events emit --kind needs_input --session reviewer --summary "Need a decision"
 agent-tmux events list --unread
-agent-tmux events wait --session reviewer --since-mark <mark-id> --timeout 1800 --ack
+agent-tmux events wait --since-mark <mark-id> --timeout 1800 --ack
 agent-tmux events ack <event-id>
 ```
 
 Use `--json` on `events wait` or `events list` when a manager agent needs machine-readable output.
-Use `--since-mark <mark-id>` after `prompt`; use `--from-now` only when no prompt mark exists.
+Use `--since-mark <mark-id>` after `prompt`; session is inferred from the mark automatically. Add `--all-sessions` only when waiting for any session after that mark.
+Use `--from-now` only when no prompt mark exists; add `--session <name>` when targeting a specific session without a mark.
 Use `--topic <topic>` for board-specific waits. Do not combine `--topic` with the default attention wait unless you intentionally want to ignore native events that have no topic.
 
 ## Event Meaning

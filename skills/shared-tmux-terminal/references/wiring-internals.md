@@ -14,6 +14,8 @@ Implementation details for the native-hook wiring per vendor. Read this only whe
 | `pi` | pi | profile-aware keys only — no native hooks |
 | `gemini` | gemini | profile-aware keys only — no native hooks yet |
 
+When no recognized basename matches, `--agent` defaults to the `generic` profile (aliases: `shell`, `bash`, `zsh`, `terminal`). `generic` provides the standard key actions but does not wire native hooks. Pass `--agent generic` explicitly when the run binary is a custom shell or REPL.
+
 To add another binary, add a row to `RUN_BINARY_TO_PROFILE` in `tmux_session.py` and follow the "Adding a New Vendor" checklist below.
 
 ## Vendor Event → Canonical Kind
@@ -31,6 +33,8 @@ To add another binary, add a row to `RUN_BINARY_TO_PROFILE` in `tmux_session.py`
 | `UserPromptSubmit` | `prompt_submitted` |
 | `PreToolUse`, `PostToolUse` | `tool_event` |
 | anything else | `agent_event` |
+
+`AfterAgent` is handled by `hooks ingest` if received, but is not currently wired in the Claude or Codex settings files. The Claude Code section below lists the events actually wired.
 
 ## Claude Code
 
