@@ -44,13 +44,13 @@ esac
 ```
 
 - **Receipt JSON:** `{mark, profile, session, submitted, target}`; `.mark` is your event cursor.
-- **Event JSON:** `{id, kind, session, agent, source, summary, read_command, message_id?, topic?, path?}`; `.message_id` is set when `kind == board_post`.
+- **Event JSON:** use `.kind`; for `board_post`, read `.message_id` with `board read`.
 - **Recognized `--run` basenames** (`--agent` auto-inferred): `claude`, `codex`, `opencode`, `pi`, `gemini`. `--require-events` succeeds only for native-hook profiles (`claude`, `codex`, `opencode`, `pi`) — see `references/wiring-internals.md`.
 - The board is the report channel; the transcript is not task truth. Treat memos as reports, verify artifacts.
 
 ## Decision Rules
 
-- Continuing existing shared work: run `list` first; reuse only when there is an obvious matching live session.
+- Continuing existing shared work: run `list` first; reuse only when there is an obvious matching live session. Otherwise launch fresh.
 - Need raw terminal evidence (not an event): use `read --since-mark <mark-id>`, `wait --since-mark <mark-id>`, or `search`.
 - Session seems missing or socket access fails: `list`/`status` flag `Dead but registered` for sessions killed externally. Run `doctor` for full diagnostics; do not conclude absence from a failed probe.
 - Human wants to inspect/interfere: report the no-arg `attach` command; it opens the live-session picker.
@@ -69,16 +69,7 @@ esac
 
 ## Reporting Contract
 
-After every launch or layout change, report:
-
-- project root
-- socket path
-- session name
-- direct attach command and no-arg attach picker command
-- active pane and pane list
-- compact recent output sample
-
-Keep reports compact. The goal is easy human attachment and easy agent recovery, not a full task summary.
+After launch, include the session name and attach command from the launch receipt. For focused follow-up, run `agent-tmux status <session>`; reserve `agent-tmux report` for multi-session review.
 
 ## Runtime Notes
 

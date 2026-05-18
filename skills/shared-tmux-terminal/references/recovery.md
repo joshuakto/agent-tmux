@@ -98,7 +98,7 @@ agent-tmux move-window <source-window> <target-session>:
 
 For raw window close, drop to tmux: `tmux -S .agent/tmux.sock kill-window -t <session>:<window>`.
 
-After layout changes, run `report` and tell the human the attach command.
+After changing one session, run `status <session>` and tell the human the attach command. Use `report` only after cross-session rearrangement or when reviewing multiple sessions.
 
 ## Cleanup
 

@@ -10,7 +10,7 @@ agent-tmux prompt reviewer "<task; when finished or blocked, run: agent-tmux boa
 agent-tmux events wait --since-mark <mark-id> --ack --json --timeout 1800
 ```
 
-`--agent` is inferred from the `--run` binary basename when omitted; pass it explicitly to override. `--require-events` fails launch unless `agent-tmux` can verify session-local hook wiring *and* resolve the run-command binary (`shutil.which` for bare names, `is_file()` + executable check for absolute paths). Relative paths with separators (e.g. `./bin/claude`) are rejected.
+`--agent` is inferred from the `--run` binary basename when omitted; pass it explicitly to override. `--require-events` implies event wiring, verifies session-local hooks, and resolves the run binary. `--events` attempts the same wiring but lets launch continue if hooks are unavailable. Relative paths with separators (e.g. `./bin/claude`) are rejected; use a PATH-resolvable binary name or an absolute executable path.
 
 The launch report prints exactly what got wired (settings file, plugin, wrapper, trust state, or profile-only status). Read that — do not assume from documentation. For which `--run` basenames are recognized and which support native hooks, see `references/wiring-internals.md`.
 
