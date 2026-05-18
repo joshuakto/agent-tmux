@@ -124,6 +124,7 @@ PICKER_SESSION = "__agent_tmux_picker__"
 PICKER_FILTER = "#{!=:#{session_name}," + PICKER_SESSION + "}"
 PICKER_SESSION_TREE_ARGS = ["choose-tree", "-Zs", "-f", PICKER_FILTER]
 PICKER_WINDOW_TREE_ARGS = ["choose-tree", "-Zw", "-f", PICKER_FILTER]
+PROMPT_SUBMIT_CONFIRM_GRACE_SECONDS = 10.0
 
 
 def is_picker_target(value: str | None) -> bool:
@@ -2386,7 +2387,7 @@ def prompt_submit_warning(root: Path, registry: dict[str, Any], session: str, ma
         return None
 
     since = str(resolve_mark(root, mark_id).get("created_at") or "")
-    deadline = time.monotonic() + 3.0
+    deadline = time.monotonic() + PROMPT_SUBMIT_CONFIRM_GRACE_SECONDS
     while time.monotonic() < deadline:
         if list_events(root, session=session, kind="prompt_submitted", since_created_at=since):
             return None
