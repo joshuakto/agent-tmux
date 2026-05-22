@@ -798,6 +798,48 @@ def opencode_plugin_js(root: Path, session: str) -> str:
     )
 
 
+def pi_extension_ts(root: Path, session: str) -> str:
+    ingest_argv = json.dumps(hook_ingest_argv(root, "pi", session, quiet=True))
+    return "\n".join(
+        [
+            'import { spawnSync } from "node:child_process";',
+            "",
+            f"const INGEST = {ingest_argv};",
+            "",
+            "function emit(name: string, event: any) {",
+            "  const payload = {",
+            "    hook_event_name: name,",
+            "    event: name,",
+            "    message: name === \"input\" ? \"pi input submitted\" : \"pi agent ended\",",
+            "    source: event?.source,",
+            "    cwd: process.cwd(),",
+            "  };",
+            "  try {",
+            "    spawnSync(INGEST[0], INGEST.slice(1), {",
+            "      input: JSON.stringify(payload),",
+            "      encoding: \"utf8\",",
+            "      stdio: [\"pipe\", \"ignore\", \"ignore\"],",
+            "    });",
+            "  } catch {",
+            "    // Observer hook only: never break the Pi session.",
+            "  }",
+            "}",
+            "",
+            "export default function (pi: any) {",
+            "  pi.on(\"input\", async (event: any) => {",
+            "    // Pi may emit non-interactive input events; only user prompt submission confirms agent-tmux prompt delivery.",
+            "    if (event?.source && event.source !== \"interactive\") return;",
+            "    emit(\"input\", event);",
+            "  });",
+            "  pi.on(\"agent_end\", async (event: any) => {",
+            "    emit(\"agent_end\", event);",
+            "  });",
+            "}",
+            "",
+        ]
+    )
+
+
 def codex_app_server_hooks_list(
     root: Path,
     codex_program: str,
@@ -944,6 +986,10 @@ def write_hook_settings(
         plugin_path = config_dir / "plugins" / "agent-tmux.js"
         atomic_write_text(plugin_path, opencode_plugin_js(root, session))
         return config_dir, "native-hook", None, {"mode": "opencode-plugin", "plugin_path": str(plugin_path)}
+    if profile_name == "pi":
+        extension_path = hooks_dir(root, session) / "pi-agent-tmux-extension.ts"
+        atomic_write_text(extension_path, pi_extension_ts(root, session))
+        return extension_path, "native-hook", None, {"mode": "pi-extension"}
     return None, "unsupported-agent", f"{profile_name} profile is supported, but native event hooks are not implemented", {"mode": "profile-only"}
 
 
@@ -1024,6 +1070,8 @@ def event_path_label(events_info: dict[str, Any]) -> str:
         return "hook config"
     if mode == "opencode-plugin":
         return "hook config dir"
+    if mode == "pi-extension":
+        return "hook extension"
     return "hook path"
 
 
@@ -1200,6 +1248,16 @@ def wire_opencode_run_command(root: Path, session: str, run: str | None, config_
     wrapper_path = write_opencode_wrapper(root, session, tokens[0], config_dir)
     tokens[0] = str(wrapper_path)
     return shlex.join(tokens), True, None, str(wrapper_path)
+
+
+def wire_pi_run_command(run: str | None, extension_path: Path | None) -> tuple[str | None, bool, str | None]:
+    if not extension_path:
+        return run, False, "no Pi hook extension"
+    tokens, error = parse_run_for_wiring(run, "pi")
+    if tokens is None:
+        return run, False, error
+    tokens[1:1] = ["--extension", str(extension_path)]
+    return shlex.join(tokens), True, None
 
 
 def session_exists(socket: Path, session: str) -> bool:
@@ -1873,7 +1931,7 @@ def launch(args: argparse.Namespace) -> int:
             agent_inferred_from_run = True
     if events_requested:
         if not agent:
-            events_info = {"requested": True, "status": "missing-agent", "warning": "pass --agent or use a native-hook --run binary (claude, codex, opencode) to enable event wiring"}
+            events_info = {"requested": True, "status": "missing-agent", "warning": "pass --agent or use a native-hook --run binary (claude, codex, opencode, pi) to enable event wiring"}
         else:
             profile_name = resolve_profile(agent)[0]
             codex_program = "codex"
@@ -1914,10 +1972,12 @@ def launch(args: argparse.Namespace) -> int:
                     effective_run, wired, run_warning, wrapper_path = wire_opencode_run_command(root, session, run_original, settings_path)
                     if wrapper_path:
                         events_info["wrapper_path"] = wrapper_path
+                elif events_info["agent"] == "pi":
+                    effective_run, wired, run_warning = wire_pi_run_command(run_original, settings_path)
                 else:
                     wired, run_warning = False, f"native hook run wiring is not implemented for agent profile: {events_info['agent']}"
                 events_info["run_wired"] = wired
-                if wired and events_info["agent"] in {"claude", "codex"}:
+                if wired and events_info["agent"] in {"claude", "codex", "pi"}:
                     events_info["prompt_submit_hook"] = True
                 if run_warning:
                     events_info["run_warning"] = run_warning
@@ -2742,7 +2802,7 @@ def hook_kind(agent: str, payload: dict[str, Any]) -> tuple[str, str]:
     event_name = str(payload.get("hook_event_name") or payload.get("event") or payload.get("type") or "")
     event_lower = re.sub(r"[^a-z0-9]+", "", event_name.lower())
     message = str(payload.get("message") or payload.get("reason") or payload.get("tool_name") or "").strip()
-    if event_lower in {"stop", "subagentstop", "afteragent", "sessionidle"}:
+    if event_lower in {"stop", "subagentstop", "afteragent", "sessionidle", "agentend"}:
         return "agent_stop", message or f"{agent} turn ended"
     if event_lower in {"stopfailure", "sessionerror"}:
         return "hook_error", message or f"{agent} stop hook failure"
@@ -2752,7 +2812,7 @@ def hook_kind(agent: str, payload: dict[str, Any]) -> tuple[str, str]:
         return "permission_request", message or f"{agent} permission request"
     if event_lower in {"sessionstart"}:
         return "session_started", message or f"{agent} session started"
-    if event_lower in {"userpromptsubmit"}:
+    if event_lower in {"userpromptsubmit", "input"}:
         return "prompt_submitted", message or f"{agent} prompt submitted"
     if event_lower in {"pretooluse", "posttooluse"}:
         return "tool_event", message or f"{agent} tool event"
@@ -2805,7 +2865,10 @@ def hooks_cmd(args: argparse.Namespace) -> int:
         if profile_name == "opencode":
             print(opencode_plugin_js(root, args.session))
             return 0
-        raise SystemExit(f"show-config is only implemented for claude, codex, and opencode, not {profile_name}")
+        if profile_name == "pi":
+            print(pi_extension_ts(root, args.session))
+            return 0
+        raise SystemExit(f"show-config is only implemented for claude, codex, opencode, and pi, not {profile_name}")
 
     if args.hooks_action == "status":
         registry = load_registry(registry_path(root))
