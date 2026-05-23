@@ -2704,9 +2704,9 @@ def board_cmd(args: argparse.Namespace) -> int:
     if args.board_action == "post":
         inferred_session = infer_current_tmux_session(socket)
         session = args.session or inferred_session
+        registry = load_registry(registry_path(root))
         from_agent = args.from_agent
         if not from_agent:
-            registry = load_registry(registry_path(root))
             if (
                 inferred_session
                 and session == inferred_session
@@ -2717,6 +2717,7 @@ def board_cmd(args: argparse.Namespace) -> int:
                 raise SystemExit(
                     "cannot infer poster; pass --from <name> or run inside a managed tmux pane"
                 )
+        agent_profile = infer_session_agent(registry, session) if session else None
         if args.body_file:
             body_path = Path(args.body_file).expanduser()
             body = body_path.read_text()
@@ -2753,7 +2754,8 @@ def board_cmd(args: argparse.Namespace) -> int:
             {
                 "kind": "board_post",
                 "session": session,
-                "agent": from_agent,
+                "agent": agent_profile,
+                "from": from_agent,
                 "source": "agent_tmux",
                 "confidence": "explicit",
                 "summary": f"{from_agent} posted to {args.topic}",

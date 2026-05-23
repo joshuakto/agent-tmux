@@ -18,7 +18,7 @@ Events are small wakeups for the manager agent. Use the mark printed by `prompt`
 
 ## Event JSON Fields
 
-Event records include `{schema_version, id, kind, session, agent, source, confidence, summary, created_at, read_command}` plus kind-specific fields such as `message_id`, `topic`, and `path`. Branch on `.kind`. For `board_post`, use `.message_id` with `board read`. `read_command` may be null; treat it as metadata for manual recovery or tooling, not the golden path.
+Event records include `{schema_version, id, kind, session, agent, source, confidence, summary, created_at, read_command}` plus kind-specific fields such as `message_id`, `topic`, `path`, and `from`. `.agent` is the terminal-agent profile when known; for `board_post`, `.from` is the poster. Branch on `.kind`. For `board_post`, use `.message_id` with `board read`. `read_command` may be null; treat it as metadata for manual recovery or tooling, not the golden path.
 
 ## Default Kind Filter
 
