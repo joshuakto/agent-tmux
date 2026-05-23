@@ -6,18 +6,15 @@ Give terminal agents this concise contract when they need shared tmux access.
 Use agent-tmux for shared interactive terminal work.
 Run from the project root, or pass --cwd /path/to/project.
 
-Golden path for supervising terminal agents:
+Use the canonical supervised worker loop in skills/shared-tmux-terminal/SKILL.md. These are the contract rules around it:
 1. If continuing existing work, scan first:
    agent-tmux list
-2. Launch with native event wiring:
-   agent-tmux launch --session <name> --require-events --purpose <purpose> --run "claude --name <name>" --log
+2. Reuse only an obvious live match. Otherwise launch a fresh named session with native event wiring:
+   agent-tmux launch --session <name> --require-events --purpose <purpose> --run "<native-hook cli>" --log
 3. Relay the launch receipt's session name and attach command to the human.
-4. Send terminal-agent instructions:
-   agent-tmux prompt <session> "<instruction; when finished or blocked, run: agent-tmux board post --topic <topic> \"concise status memo\">"
-5. Use the mark returned by prompt to wait for the next attention event (session inferred from mark):
-   agent-tmux events wait --since-mark <mark-id> --ack --json --timeout 1800
-6. If the event is board_post, read the memo using the event's message_id:
-   agent-tmux board read <message-id>
+4. Send work with prompt. The instruction must tell the worker to post a board memo when finished or blocked.
+5. Use the mark returned by prompt as the event cursor; with --since-mark, the session is inferred.
+6. If the event is board_post, read the memo using the event's message_id.
 7. Use transcript reads only for recovery or evidence:
    agent-tmux read <session> --since-mark <mark-id> --lines 120
 8. If the session seems missing or socket access fails:
@@ -37,26 +34,7 @@ Reuse an existing session only when `list` shows an obvious live match. Otherwis
 
 ## Manager-Agent Contract
 
-When supervising another terminal agent, use events and board messages to avoid repeated pane polling:
-
-```text
-Launch with native event wiring when supported:
-agent-tmux launch --session <name> --require-events --purpose <purpose> --run "claude --name <name>" --log
-agent-tmux launch --session <name> --require-events --purpose <purpose> --run "codex" --log
-agent-tmux launch --session <name> --require-events --purpose <purpose> --run "opencode" --log
-agent-tmux launch --session <name> --require-events --purpose <purpose> --run "pi" --log
-
-Send work:
-agent-tmux prompt <session> "<instruction; when finished or blocked, run: agent-tmux board post --topic <topic> \"concise status memo\">"
-
-Wait for the next attention event (session inferred from mark):
-agent-tmux events wait --since-mark <mark-id> --ack --json --timeout 1800
-
-If the event is board_post, read the referenced board memo using the event's message_id:
-agent-tmux board read <message-id>
-
-Use transcript reads only for recovery or evidence checks.
-```
+When supervising another terminal agent, use events and board messages to avoid repeated pane polling. The supported native-hook CLIs are `claude`, `codex`, `opencode`, and `pi`; the exact launch wiring and vendor limits live in `references/wiring-internals.md`.
 
 Events are wakeups. Board posts are durable memos and infer poster/session from the current managed tmux pane. Neither is task truth.
 

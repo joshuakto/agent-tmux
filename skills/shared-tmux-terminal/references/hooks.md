@@ -4,11 +4,7 @@ Use native hooks when a manager agent needs reliable wakeups from a terminal-age
 
 ## Reliable Path
 
-```bash
-agent-tmux launch --session reviewer --require-events --run "<binary> ..." --log
-agent-tmux prompt reviewer "<task; when finished or blocked, run: agent-tmux board post --topic review \"concise status memo\">"
-agent-tmux events wait --since-mark <mark-id> --ack --json --timeout 1800
-```
+Use the canonical supervised worker loop in [SKILL.md](../SKILL.md#golden-path). This reference covers the hook-specific part of that loop: launch native-hook terminal agents with `--require-events`.
 
 `--agent` is inferred from the `--run` binary basename when omitted; pass it explicitly to override. `--require-events` implies event wiring, verifies session-local hooks, and resolves the run binary. `--events` attempts the same wiring but lets launch continue if hooks are unavailable. Relative paths with separators (e.g. `./bin/claude`) are rejected; use a PATH-resolvable binary name or an absolute executable path.
 

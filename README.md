@@ -32,18 +32,13 @@ agent-tmux install-wrapper
 
 The wrapper is intentionally small. It forwards to `agent-tmux` and does not store state.
 
-## Golden Path
-
-```bash
-agent-tmux launch --session reviewer --require-events --purpose review --run "claude --name reviewer" --log
-agent-tmux prompt reviewer "Run tests. When finished or blocked, run: agent-tmux board post --topic review \"concise status memo\""
-agent-tmux events wait --since-mark <mark-id> --ack --json --timeout 1800
-agent-tmux board read <message-id>
-```
+## Quick Start
 
 With the project wrapper, replace `agent-tmux` with `.agent/tmux`.
 
-Launch prints the session name and attach command. For focused follow-up on one session, run `agent-tmux status reviewer`; use `agent-tmux report` only for multi-session review.
+For supervised terminal-agent work, use the canonical [Golden Path](skills/shared-tmux-terminal/SKILL.md#golden-path): launch with `--require-events`, send work with `prompt`, wait from the returned mark, then read board memos by `message_id`. That file is the source of truth for the executable manager-agent loop.
+
+Launch prints the session name and attach command. For focused follow-up on one session, run `agent-tmux status <session>`; use `agent-tmux report` only for multi-session review.
 
 `prompt` infers the agent profile from the session registry and prints the pre-send transcript mark in its receipt. With `--since-mark`, `events wait` infers the session from the mark. `events wait` and `events list` default `--kind` to the manager attention set (`board_post,needs_input,permission_request,agent_stop,hook_error`); pass `--kind all` to widen, or an explicit comma-separated list to narrow.
 
@@ -84,7 +79,7 @@ agent-tmux attach shell
 Detailed documentation lives in `skills/shared-tmux-terminal/references/`:
 
 - `agent-contract.md`: reusable agent instruction block for handing the contract to terminal agents.
-- `manager-events.md`: event-driven manager-agent loop, default kind filter, full event meaning, field lessons.
+- `manager-events.md`: event semantics, default kind filter, full event meaning, field lessons.
 - `board.md`: append-only memo board for durable agent memos.
 - `hooks.md`: native hook ingestion, canonical event kinds, the reliable launch path.
 - `wiring-internals.md`: recognized `--run` binaries, per-vendor file layout, rules for adding a new vendor.
