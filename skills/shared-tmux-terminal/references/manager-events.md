@@ -10,11 +10,15 @@ agent-tmux prompt reviewer "Run the task. When finished or blocked, run: agent-t
 agent-tmux events wait --since-mark <mark-id> --ack --json --timeout 1800
 ```
 
-Use the same command shape for native-hook CLIs such as `--run "codex"` or `--run "opencode"`. `--agent` is inferred for recognized binaries; pass it only to override.
+Use the same command shape for native-hook CLIs such as `--run "codex"`, `--run "opencode"`, or `--run "pi"`. `--agent` is inferred for recognized binaries; pass it only to override.
 With `--since-mark`, session is inferred from the mark. Add `--all-sessions` only when you need the next event from any session after that mark.
 
 `prompt` infers the agent profile from the session registry. At launch, `--agent` is usually inferred from recognized `--run` binaries.
 Events are small wakeups for the manager agent. Use the mark printed by `prompt` as the event cursor so stale unread events from earlier turns are ignored. Events are not task truth.
+
+## Event JSON Fields
+
+Event records include `{schema_version, id, kind, session, agent, source, confidence, summary, created_at, read_command}` plus kind-specific fields such as `message_id`, `topic`, and `path`. Branch on `.kind`. For `board_post`, use `.message_id` with `board read`. `read_command` may be null; treat it as metadata for manual recovery or tooling, not the golden path.
 
 ## Default Kind Filter
 
@@ -66,7 +70,7 @@ Pass `--kind all` (or an explicit list) to surface these.
 
 ## Manager Branches
 
-- `board_post`: read the memo with the event's `read_command` or `board read <message-id>`.
+- `board_post`: read the memo with `board read <message-id>` from the event's `.message_id`.
 - `needs_input`: inspect recent output or ask the human for the missing input.
 - `permission_request`: surface the decision; never auto-approve.
 - `agent_stop`: if no memo arrived, read recent output or prompt the worker to post one.

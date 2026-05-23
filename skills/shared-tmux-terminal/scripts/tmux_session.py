@@ -854,7 +854,7 @@ def codex_app_server_hooks_list(
             cwd=str(root),
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
-            stderr=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
             text=True,
             bufsize=1,
         )
@@ -876,7 +876,11 @@ def codex_app_server_hooks_list(
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
             if process.poll() is not None:
-                break
+                stderr = process.stderr.read().strip() if process.stderr is not None else ""
+                detail = f" (exit {process.returncode})"
+                if stderr:
+                    detail += f": {stderr}"
+                raise RuntimeError(f"codex app-server exited before hooks/list{detail}")
             remaining = max(0.0, deadline - time.monotonic())
             readable, _, _ = select.select([process.stdout], [], [], min(0.25, remaining))
             if not readable:
