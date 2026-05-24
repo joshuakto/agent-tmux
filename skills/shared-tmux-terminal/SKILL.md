@@ -62,7 +62,7 @@ esac
 - `references/recovery.md`: missing sessions, stale history, stuck processes, raw input, logs, dumps, pane/window recovery.
 - `references/agent-profiles.md`: terminal-agent key behavior and profile actions.
 - `references/human-tmux.md`: attach, mouse scrolling, tmux profile, pane/window navigation for humans.
-- `references/manager-events.md`: event-driven manager-agent loop.
+- `references/manager-events.md`: event semantics and manager attention kinds.
 - `references/board.md`: append-only message board for clean memos.
 - `references/hooks.md`: native hook ingestion and the supported-CLI table.
 - `references/wiring-internals.md`: per-vendor file layout and rewrite rules — only when debugging the plumbing or adding a new vendor.

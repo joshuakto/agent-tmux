@@ -2,15 +2,11 @@
 
 Use this when one agent supervises terminal agents running inside `agent-tmux`.
 
-## Core Loop
+## Canonical Loop
 
-```bash
-agent-tmux launch --session reviewer --require-events --purpose review --run "claude --name reviewer" --log
-agent-tmux prompt reviewer "Run the task. When finished or blocked, run: agent-tmux board post --topic review \"concise status memo\""
-agent-tmux events wait --since-mark <mark-id> --ack --json --timeout 1800
-```
+Use the canonical supervised worker loop in [SKILL.md](../SKILL.md#golden-path). This reference explains event semantics, filters, and recovery edges so the loop stays in one place.
 
-Use the same command shape for native-hook CLIs such as `--run "codex"`, `--run "opencode"`, or `--run "pi"`. `--agent` is inferred for recognized binaries; pass it only to override.
+In the SKILL loop, replace the launch command's `--run` value for native-hook CLIs such as `--run "codex"`, `--run "opencode"`, or `--run "pi"`. `--agent` is inferred for recognized binaries; pass it only to override.
 With `--since-mark`, session is inferred from the mark. Add `--all-sessions` only when you need the next event from any session after that mark.
 
 `prompt` infers the agent profile from the session registry. At launch, `--agent` is usually inferred from recognized `--run` binaries.
