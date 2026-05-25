@@ -2673,7 +2673,7 @@ def events_cmd(args: argparse.Namespace) -> int:
                 return 0
             if time.monotonic() >= deadline:
                 if args.json:
-                    print(json.dumps({"timeout": True, "session": effective_session}))
+                    print(json.dumps({"kind": "timeout", "timeout": True, "session": effective_session}))
                 elif not args.quiet:
                     print("timeout waiting for event")
                 return 1
