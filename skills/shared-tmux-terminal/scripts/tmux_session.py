@@ -2676,7 +2676,7 @@ def events_cmd(args: argparse.Namespace) -> int:
                     print(json.dumps({"kind": "timeout", "session": effective_session}))
                 elif not args.quiet:
                     print("timeout waiting for event")
-                return 1
+                return 0
             time.sleep(args.interval)
 
     if args.events_action == "ack":

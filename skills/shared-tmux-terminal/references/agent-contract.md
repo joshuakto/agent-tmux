@@ -23,6 +23,7 @@ Use the canonical supervised worker loop in skills/shared-tmux-terminal/SKILL.md
    agent-tmux attach
 
 `prompt` infers the agent profile from the session registry. `--agent` is inferred at launch for recognized binaries; pass it only to override.
+`events wait` exits 0 for both event-found and timeout; exits non-zero only on errors. Check `.kind` (not `$?`) to detect timeout — this keeps `set -e` scripts safe.
 `events wait` and `events list` default to the manager attention set (`board_post,needs_input,permission_request,agent_stop,hook_error`). Pass `--kind all` to widen, or `--kind <list>` to narrow.
 Do not treat logs, marks, or wait output as task truth.
 Task truth comes from artifacts, tests, commits, process exit status, and explicit reports.
