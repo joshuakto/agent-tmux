@@ -71,7 +71,7 @@ Pass `--kind all` (or an explicit list) to surface these.
 - `permission_request`: surface the decision; never auto-approve.
 - `agent_stop`: if no memo arrived, read recent output or prompt the worker to post one.
 - `hook_error`: run `hooks status` or `doctor`.
-- `timeout`: `events wait --json` emits `{"kind":"timeout","timeout":true}` on timeout. Read recent output or re-prompt.
+- `timeout`: `events wait --json` emits `{"kind":"timeout","session":...}` on timeout. Read recent output or re-prompt.
 
 Use `read`, `wait`, `search`, and `attach` only for recovery, inherited sessions, or evidence checks.
 
