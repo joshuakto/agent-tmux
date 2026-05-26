@@ -39,7 +39,7 @@ case "$KIND" in
   needs_input|permission_request)   agent-tmux read reviewer --since-mark "$MARK" ;;  # inspect, decide
   agent_stop)                       agent-tmux read reviewer --since-mark "$MARK" ;;  # no memo; recover
   hook_error)                       echo "see references/hooks.md" ;;
-  null)                             agent-tmux read reviewer --since-mark "$MARK" ;;  # timeout; inspect
+  timeout)                          agent-tmux read reviewer --since-mark "$MARK" ;;  # timeout; inspect
 esac
 ```
 
