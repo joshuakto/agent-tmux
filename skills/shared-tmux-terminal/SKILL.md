@@ -30,21 +30,24 @@ TASK='<task>. When done or blocked, run: agent-tmux board post --topic <topic> "
 MARK=$(agent-tmux prompt reviewer "$TASK" --json | jq -r .mark)
 
 # 3. Wait for the next attention event after the mark. Session is inferred from the mark.
-EVENT=$(agent-tmux events wait --since-mark "$MARK" --ack --json --timeout 1800)
+#    events wait exits 0 for both event-found and timeout; branch on .kind.
+EVENT=$(agent-tmux events wait --since-mark "$MARK" --ack --json)
 KIND=$(echo "$EVENT" | jq -r .kind)
 
 # 4. Branch on the event kind.
 case "$KIND" in
   board_post)                       agent-tmux board read "$(echo "$EVENT" | jq -r .message_id)" ;;
-  needs_input|permission_request)   agent-tmux read reviewer --since-mark "$MARK" ;;  # inspect, decide
-  agent_stop)                       agent-tmux read reviewer --since-mark "$MARK" ;;  # no memo; recover
+  needs_input|permission_request)   agent-tmux read --since-mark "$MARK" ;;  # inspect, decide
+  agent_stop)                       agent-tmux read --since-mark "$MARK" ;;  # no memo; recover
   hook_error)                       echo "see references/hooks.md" ;;
-  timeout)                          agent-tmux read reviewer --since-mark "$MARK" ;;  # timeout; inspect
+  timeout)                          agent-tmux read --since-mark "$MARK" ;;  # timeout; inspect
 esac
 ```
 
 - **Receipt JSON:** `{mark, profile, session, submitted, target}`; `.mark` is your event cursor.
 - **Event JSON:** use `.kind`; for `board_post`, read `.message_id` with `board read`.
+- **Exit codes:** `events wait` exits 0 for both event-found and timeout; exits non-zero only on errors (no socket, invalid session). Check `.kind` — not `$?` — to detect timeout. This means command substitution in `set -e` scripts is safe.
+- **Multi-turn loop:** after handling `agent_stop`, `needs_input`, or `permission_request`, re-issue `prompt` with new text, capture the new `$MARK`, then call `events wait --since-mark "$MARK"` again. The mark advances the event cursor so stale earlier events are ignored.
 - **Recognized `--run` basenames** (`--agent` auto-inferred): `claude`, `codex`, `opencode`, `pi`, `gemini`. `--require-events` succeeds only for native-hook profiles (`claude`, `codex`, `opencode`, `pi`) — see `references/wiring-internals.md`.
 - The board is the report channel; the transcript is not task truth. Treat memos as reports, verify artifacts.
 

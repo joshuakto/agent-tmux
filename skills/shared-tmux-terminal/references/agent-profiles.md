@@ -24,8 +24,8 @@ agent-tmux prompt reviewer "Summarize current status."
 `prompt` creates a transcript mark before sending by default. The mark is an out-of-band log offset and event cursor, not text typed into the terminal. In the manager-agent loop, use it with `events wait --since-mark`. Use transcript reads only when you need raw terminal evidence:
 
 ```bash
-agent-tmux read reviewer --since-mark <mark-id> --lines 120
-agent-tmux wait reviewer "complete|failed" --since-mark <mark-id> --timeout 300
+agent-tmux read --since-mark <mark-id> --lines 120
+agent-tmux wait --since-mark <mark-id> "complete|failed" --timeout 300
 ```
 
 Use `action` when text is already present in the terminal UI or when you need a non-text key:
