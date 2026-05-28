@@ -2499,6 +2499,11 @@ def prompt_cmd(args: argparse.Namespace) -> int:
     agent_name = args.agent or infer_session_agent(registry, args.session)
     profile_name, profile = resolve_profile(agent_name)
     session_key = session_name_from_target(args.session, target)
+    report_back_topic = getattr(args, "report_back_topic", None)
+    text = args.text
+    if report_back_topic:
+        board_post_cmd = user_command(root, f"board post --topic {shlex.quote(report_back_topic)}")
+        text = text.rstrip() + f"\n\nWhen you have completed this task or become blocked, post a board memo:\n{board_post_cmd} \"<concise status>\""
     mark_id = None
     with file_lock(prompt_lock_path(root, target)):
         if args.mark:
@@ -2512,7 +2517,7 @@ def prompt_cmd(args: argparse.Namespace) -> int:
             )
             if changed:
                 save_registry_session(registry_file, registry, session_key)
-        send_text(socket, target, args.text)
+        send_text(socket, target, text)
         if args.submit:
             delay = float(profile.get("submit_delay_seconds", 0) or 0)
             if delay > 0:
@@ -2528,13 +2533,18 @@ def prompt_cmd(args: argparse.Namespace) -> int:
         "submitted": bool(args.submit),
         "target": target,
     }
+    if report_back_topic:
+        receipt["report_back_topic"] = report_back_topic
     if warning:
         receipt["warning"] = warning
-    if args.json:
+    if getattr(args, "print_mark", False):
+        print(mark_id or "")
+    elif args.json:
         print(json.dumps(receipt, sort_keys=True))
     elif not args.quiet:
         suffix = f" mark={mark_id}" if mark_id else ""
-        print(f"prompt sent: target={target} profile={profile_name} submitted={'yes' if args.submit else 'no'}{suffix}")
+        rbt = f" report_back_topic={report_back_topic}" if report_back_topic else ""
+        print(f"prompt sent: target={target} profile={profile_name} submitted={'yes' if args.submit else 'no'}{suffix}{rbt}")
         if warning:
             print(f"warning: {warning}")
     return 0
@@ -3408,6 +3418,12 @@ def parser() -> argparse.ArgumentParser:
     prompt.add_argument("--no-submit", dest="submit", action="store_false", help="Paste text but do not submit")
     prompt.add_argument("--no-mark", dest="mark", action="store_false", help="Do not create a transcript mark before sending")
     prompt.add_argument("--mark-label", help="Optional label for the pre-send mark")
+    prompt.add_argument(
+        "--report-back-topic",
+        metavar="TOPIC",
+        help="Append a standard board-post instruction. The worker is told to post a memo to this topic when done or blocked.",
+    )
+    prompt.add_argument("--print-mark", action="store_true", help="Print only the mark id (no other output); useful in scripts that assign the mark directly without jq")
     prompt.add_argument("--quiet", action="store_true")
     prompt.add_argument("--json", action="store_true", help="Emit a machine-readable receipt")
     prompt.set_defaults(func=prompt_cmd, submit=True, mark=True)
