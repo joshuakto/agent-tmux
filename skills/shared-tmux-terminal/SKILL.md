@@ -30,25 +30,23 @@ agent-tmux launch --session reviewer --purpose "review" --require-events --run "
 TASK='<task>'
 MARK=$(agent-tmux prompt reviewer "$TASK" --report-back-topic <topic> --print-mark)
 
-# 3. Wait for the next attention event after the mark. Session is inferred from the mark.
+# 3. Wait for the next attention event after the mark. Session is inferred; event is acked automatically.
 #    events wait exits 0 for both event-found and timeout; branch on .kind.
-EVENT=$(agent-tmux events wait --since-mark "$MARK" --ack --json)
+EVENT=$(agent-tmux events wait --since-mark "$MARK" --json)
 KIND=$(echo "$EVENT" | jq -r .kind)
 
 # 4. Branch on the event kind.
 case "$KIND" in
-  board_post)                       agent-tmux board read "$(echo "$EVENT" | jq -r .message_id)" ;;
-  needs_input|permission_request)   agent-tmux read --since-mark "$MARK" ;;  # inspect, decide
-  agent_stop)                       agent-tmux read --since-mark "$MARK" ;;  # no memo; recover
-  hook_error)                       echo "see references/hooks.md" ;;
-  timeout)                          agent-tmux read --since-mark "$MARK" ;;  # timeout; inspect
+  board_post)  echo "$EVENT" | jq -r '.board_body // empty' ;;  # body embedded; or: board read $(jq -r .message_id)
+  hook_error)  agent-tmux hooks status reviewer ;;
+  *)           agent-tmux read --since-mark "$MARK" ;;  # needs_input, permission_request, agent_stop, timeout
 esac
 ```
 
 - **`--report-back-topic <topic>`** appends `When you have completed this task or become blocked, post a board memo: agent-tmux board post --topic <topic> "<concise status>"` to the task text. The worker sees the instruction as part of its prompt; the manager never has to compose it manually.
 - **`--print-mark`** outputs only the mark id. Use `--json | jq -r .mark` when you also need `profile`, `submitted`, or `warning` from the receipt.
 - **Receipt JSON:** `{mark, profile, report_back_topic, session, submitted, target}`; `.mark` is your event cursor.
-- **Event JSON:** use `.kind`; for `board_post`, read `.message_id` with `board read`.
+- **Event JSON:** use `.kind`; for `board_post`, `.board_body` contains the stripped memo body (no extra `board read` call needed). `events wait` acks the returned event by default; pass `--no-ack` to suppress.
 - **Recognized `--run` basenames** (`--agent` auto-inferred): `claude`, `codex`, `opencode`, `pi`, `gemini`. `--require-events` succeeds only for native-hook profiles (`claude`, `codex`, `opencode`, `pi`) — see `references/wiring-internals.md`.
 - The board is the report channel; the transcript is not task truth. Treat memos as reports, verify artifacts.
 

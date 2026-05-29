@@ -674,6 +674,17 @@ def board_frontmatter_value(text: str, key: str) -> str:
     return ""
 
 
+def board_body_from_text(text: str) -> str | None:
+    if not text.startswith("---\n"):
+        return text.strip() or None
+    lines = text.splitlines()
+    for i, line in enumerate(lines[1:], start=1):
+        if line == "---":
+            body = "\n".join(lines[i + 1:]).strip()
+            return body or None
+    return text.strip() or None
+
+
 def list_board_messages(root: Path, *, topic: str | None = None) -> list[dict[str, str]]:
     base = board_root(root) / "threads"
     if not base.exists():
@@ -2680,7 +2691,16 @@ def events_cmd(args: argparse.Namespace) -> int:
         if args.limit and len(events) > args.limit:
             events = events[-args.limit :]
         if args.json:
-            print(json.dumps(events, sort_keys=True))
+            enriched = []
+            for ev in events:
+                if ev.get("kind") == "board_post":
+                    path_str = ev.get("path")
+                    if path_str:
+                        body = board_body_from_text(Path(path_str).read_text(errors="replace"))
+                        if body is not None:
+                            ev = {**ev, "board_body": body}
+                enriched.append(ev)
+            print(json.dumps(enriched, sort_keys=True))
             return 0
         for event in events:
             print_event(event)
@@ -2705,6 +2725,12 @@ def events_cmd(args: argparse.Namespace) -> int:
                 event = events[0]
                 if args.ack:
                     ack_event(root, event["id"], consumer)
+                if args.json and event.get("kind") == "board_post":
+                    path_str = event.get("path")
+                    if path_str:
+                        body = board_body_from_text(Path(path_str).read_text(errors="replace"))
+                        if body is not None:
+                            event = {**event, "board_body": body}
                 print_event(event, json_output=args.json)
                 return 0
             if time.monotonic() >= deadline:
@@ -3494,10 +3520,10 @@ def parser() -> argparse.ArgumentParser:
     events_wait.add_argument("--since-mark", help="Wait only for events created after a transcript mark")
     events_wait.add_argument("--all-sessions", action="store_true", help="With --since-mark, wait for events from any session after that mark")
     events_wait.add_argument("--from-now", action="store_true", help="Wait only for events created after invocation")
-    events_wait.add_argument("--ack", action="store_true", help="Ack the event before returning")
+    events_wait.add_argument("--no-ack", dest="ack", action="store_false", help="Do not ack the event (default: ack on return)")
     events_wait.add_argument("--json", action="store_true")
     events_wait.add_argument("--quiet", action="store_true")
-    events_wait.set_defaults(func=events_cmd)
+    events_wait.set_defaults(func=events_cmd, ack=True)
     events_ack = events_sub.add_parser("ack", help="Acknowledge an event for a consumer")
     events_ack.add_argument("event_id")
     events_ack.add_argument("--consumer", help="Consumer name")

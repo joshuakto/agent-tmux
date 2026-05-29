@@ -31,7 +31,7 @@ To widen, pass `--kind all`. To narrow, pass an explicit comma-separated list (e
 ```bash
 agent-tmux events emit --kind needs_input --session reviewer --summary "Need a decision"
 agent-tmux events list --unread
-agent-tmux events wait --since-mark <mark-id> --timeout 1800 --ack
+agent-tmux events wait --since-mark <mark-id> --timeout 1800        # acks by default; pass --no-ack to suppress
 agent-tmux events ack <event-id>
 ```
 
@@ -66,7 +66,7 @@ Pass `--kind all` (or an explicit list) to surface these.
 
 ## Manager Branches
 
-- `board_post`: read the memo with `board read <message-id>` from the event's `.message_id`.
+- `board_post`: with `--json`, `.board_body` contains the stripped memo body directly; or call `board read <message-id>` from the event's `.message_id`.
 - `needs_input`: inspect recent output or ask the human for the missing input.
 - `permission_request`: surface the decision; never auto-approve.
 - `agent_stop`: if no memo arrived, read recent output or prompt the worker to post one.
@@ -79,7 +79,7 @@ Use `read`, `wait`, `search`, and `attach` only for recovery, inherited sessions
 
 Practical edges from real multi-agent runs:
 
-- Use `prompt` marks as the event cursor. `events wait --since-mark <mark-id>` prevents stale unread hook events from waking the manager after a new prompt.
+- Use `prompt` marks as the event cursor. `events wait --since-mark <mark-id>` prevents stale unread hook events from waking the manager after a new prompt. `events wait` acks the returned event by default; pass `--no-ack` if you need to ack later.
 - Parallel `prompt` calls are safe across sessions and serialized per target pane, so text and submit keys are not interleaved.
 - Treat native events as wakeups, not conclusions. Verify task truth from artifacts, commits, process status, and explicit board memos.
 - Keep persistence policy outside `agent-tmux`. The project should say where durable artifacts live; for Colab experiments, GitHub branches were more reliable than Drive because Drive auth can require interactive credentials.
