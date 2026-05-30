@@ -674,6 +674,17 @@ def board_frontmatter_value(text: str, key: str) -> str:
     return ""
 
 
+def board_body_from_text(text: str) -> str | None:
+    if not text.startswith("---\n"):
+        return text.strip() or None
+    lines = text.splitlines()
+    for i, line in enumerate(lines[1:], start=1):
+        if line == "---":
+            body = "\n".join(lines[i + 1:]).strip()
+            return body or None
+    return text.strip() or None
+
+
 def list_board_messages(root: Path, *, topic: str | None = None) -> list[dict[str, str]]:
     base = board_root(root) / "threads"
     if not base.exists():
@@ -2089,6 +2100,26 @@ def launch(args: argparse.Namespace) -> int:
     )
 
     panes = list_panes(socket, session)
+    if getattr(args, "json", False):
+        receipt: dict[str, Any] = {
+            "mode": mode,
+            "session": session,
+            "socket": str(socket),
+            "attach": user_command(root, f"attach {session}"),
+            "cwd": str(root),
+        }
+        if log_path:
+            receipt["log"] = str(log_path)
+        if events_info is not None:
+            receipt["events_status"] = events_info.get("status")
+            if events_info.get("warning"):
+                receipt["events_warning"] = events_info["warning"]
+        if socket_note:
+            receipt["socket_recovery"] = socket_note
+        print(json.dumps(receipt, sort_keys=True))
+        if args.attach:
+            return attach_project_tmux(root, socket, session)
+        return 0
     print(f"{mode}: {session}")
     if mode == "recovered":
         if replay_run:
@@ -2267,8 +2298,9 @@ def read_cmd(args: argparse.Namespace) -> int:
         if args.all or args.start is not None or args.end is not None or args.no_join:
             raise SystemExit("--since-mark cannot be combined with --all, --start, --end, or --no-join")
         mark = resolve_mark(root, args.since_mark)
-        if mark.get("session") != args.session:
-            raise SystemExit(f"Mark {args.since_mark} belongs to session {mark.get('session')}, not {args.session}")
+        mark_session = mark.get("session")
+        if args.session and args.session != mark_session:
+            raise SystemExit(f"Mark {args.since_mark} belongs to session {mark_session}, not {args.session}")
         if args.pane and mark.get("target") != args.pane:
             raise SystemExit(f"Mark {args.since_mark} belongs to pane {mark.get('target')}, not {args.pane}")
         max_bytes = None if args.max_bytes == 0 else args.max_bytes
@@ -2283,6 +2315,8 @@ def read_cmd(args: argparse.Namespace) -> int:
             print()
         return 0
 
+    if not args.session:
+        raise SystemExit("read: session is required when --since-mark is not given")
     require_live_registered_session(root, socket, registry, args.session)
     target = args.pane or args.session
     start: str | int | None
@@ -2389,8 +2423,9 @@ def wait_cmd(args: argparse.Namespace) -> int:
         registry_file = registry_path(root)
         if args.since_mark:
             mark = resolve_mark(root, args.since_mark)
-            if mark.get("session") != args.session:
-                raise SystemExit(f"Mark {args.since_mark} belongs to session {mark.get('session')}, not {args.session}")
+            mark_session = mark.get("session")
+            if args.session and args.session != mark_session:
+                raise SystemExit(f"Mark {args.since_mark} belongs to session {mark_session}, not {args.session}")
             if args.pane and mark.get("target") != args.pane:
                 raise SystemExit(f"Mark {args.since_mark} belongs to pane {mark.get('target')}, not {args.pane}")
             log_path = Path(mark["log_path"])
@@ -2426,6 +2461,8 @@ def wait_cmd(args: argparse.Namespace) -> int:
                 return 1
             time.sleep(args.interval)
 
+    if not args.session:
+        raise SystemExit("wait: session is required when --since-mark is not given")
     require_live_registered_session(root, socket, registry, args.session)
     while True:
         last_text = capture_pane(socket, target, lines=args.lines)
@@ -2473,6 +2510,11 @@ def prompt_cmd(args: argparse.Namespace) -> int:
     agent_name = args.agent or infer_session_agent(registry, args.session)
     profile_name, profile = resolve_profile(agent_name)
     session_key = session_name_from_target(args.session, target)
+    report_back_topic = getattr(args, "report_back_topic", None)
+    text = args.text
+    if report_back_topic:
+        board_post_cmd = user_command(root, f"board post --topic {shlex.quote(report_back_topic)}")
+        text = text.rstrip() + f"\n\nWhen you have completed this task or become blocked, post a board memo:\n{board_post_cmd} \"<concise status>\""
     mark_id = None
     with file_lock(prompt_lock_path(root, target)):
         if args.mark:
@@ -2486,7 +2528,7 @@ def prompt_cmd(args: argparse.Namespace) -> int:
             )
             if changed:
                 save_registry_session(registry_file, registry, session_key)
-        send_text(socket, target, args.text)
+        send_text(socket, target, text)
         if args.submit:
             delay = float(profile.get("submit_delay_seconds", 0) or 0)
             if delay > 0:
@@ -2502,13 +2544,18 @@ def prompt_cmd(args: argparse.Namespace) -> int:
         "submitted": bool(args.submit),
         "target": target,
     }
+    if report_back_topic:
+        receipt["report_back_topic"] = report_back_topic
     if warning:
         receipt["warning"] = warning
-    if args.json:
+    if getattr(args, "print_mark", False):
+        print(mark_id or "")
+    elif args.json:
         print(json.dumps(receipt, sort_keys=True))
     elif not args.quiet:
         suffix = f" mark={mark_id}" if mark_id else ""
-        print(f"prompt sent: target={target} profile={profile_name} submitted={'yes' if args.submit else 'no'}{suffix}")
+        rbt = f" report_back_topic={report_back_topic}" if report_back_topic else ""
+        print(f"prompt sent: target={target} profile={profile_name} submitted={'yes' if args.submit else 'no'}{suffix}{rbt}")
         if warning:
             print(f"warning: {warning}")
     return 0
@@ -2644,7 +2691,16 @@ def events_cmd(args: argparse.Namespace) -> int:
         if args.limit and len(events) > args.limit:
             events = events[-args.limit :]
         if args.json:
-            print(json.dumps(events, sort_keys=True))
+            enriched = []
+            for ev in events:
+                if ev.get("kind") == "board_post":
+                    path_str = ev.get("path")
+                    if path_str:
+                        body = board_body_from_text(Path(path_str).read_text(errors="replace"))
+                        if body is not None:
+                            ev = {**ev, "board_body": body}
+                enriched.append(ev)
+            print(json.dumps(enriched, sort_keys=True))
             return 0
         for event in events:
             print_event(event)
@@ -2669,6 +2725,12 @@ def events_cmd(args: argparse.Namespace) -> int:
                 event = events[0]
                 if args.ack:
                     ack_event(root, event["id"], consumer)
+                if args.json and event.get("kind") == "board_post":
+                    path_str = event.get("path")
+                    if path_str:
+                        body = board_body_from_text(Path(path_str).read_text(errors="replace"))
+                        if body is not None:
+                            event = {**event, "board_body": body}
                 print_event(event, json_output=args.json)
                 return 0
             if time.monotonic() >= deadline:
@@ -2676,7 +2738,7 @@ def events_cmd(args: argparse.Namespace) -> int:
                     print(json.dumps({"kind": "timeout", "session": effective_session}))
                 elif not args.quiet:
                     print("timeout waiting for event")
-                return 1
+                return 0
             time.sleep(args.interval)
 
     if args.events_action == "ack":
@@ -3276,6 +3338,7 @@ def parser() -> argparse.ArgumentParser:
     launch_cmd.add_argument("--log", action="store_true", help="Start transcript logging for the active pane")
     launch_cmd.add_argument("--log-output", help="Transcript path; defaults under .agent/tmux.d/logs/")
     launch_cmd.add_argument("--attach", action="store_true", help="Attach after launch")
+    launch_cmd.add_argument("--json", action="store_true", help="Emit a machine-readable receipt with session, mode, socket, attach, and log fields")
     launch_cmd.set_defaults(func=launch)
 
     list_p = command("list", help="List live sessions")
@@ -3322,7 +3385,7 @@ def parser() -> argparse.ArgumentParser:
     raw_keys.set_defaults(func=keys_cmd)
 
     read = command("read", help="Capture pane history")
-    read.add_argument("session")
+    read.add_argument("session", nargs="?", help="Session name; may be omitted when --since-mark is given (inferred from the mark)")
     read.add_argument("--pane", help="Explicit pane target, e.g. session:0.0")
     read.add_argument("--lines", type=int, default=200, help="Tail this many captured lines unless --start or --all is used")
     read.add_argument("--start", help="tmux capture-pane start line for explicit history slices, e.g. -500 or 0")
@@ -3358,7 +3421,7 @@ def parser() -> argparse.ArgumentParser:
     search.set_defaults(func=search_cmd)
 
     wait = command("wait", help="Wait until pane history matches a pattern")
-    wait.add_argument("session")
+    wait.add_argument("session", nargs="?", help="Session name; may be omitted when --since-mark is given (inferred from the mark)")
     wait.add_argument("pattern")
     wait.add_argument("--pane", help="Explicit pane target, e.g. session:0.0")
     wait.add_argument("--lines", type=int, default=500, help="Tail this many captured lines on each poll")
@@ -3381,6 +3444,12 @@ def parser() -> argparse.ArgumentParser:
     prompt.add_argument("--no-submit", dest="submit", action="store_false", help="Paste text but do not submit")
     prompt.add_argument("--no-mark", dest="mark", action="store_false", help="Do not create a transcript mark before sending")
     prompt.add_argument("--mark-label", help="Optional label for the pre-send mark")
+    prompt.add_argument(
+        "--report-back-topic",
+        metavar="TOPIC",
+        help="Append a standard board-post instruction. The worker is told to post a memo to this topic when done or blocked.",
+    )
+    prompt.add_argument("--print-mark", action="store_true", help="Print only the mark id (no other output); useful in scripts that assign the mark directly without jq")
     prompt.add_argument("--quiet", action="store_true")
     prompt.add_argument("--json", action="store_true", help="Emit a machine-readable receipt")
     prompt.set_defaults(func=prompt_cmd, submit=True, mark=True)
@@ -3451,10 +3520,10 @@ def parser() -> argparse.ArgumentParser:
     events_wait.add_argument("--since-mark", help="Wait only for events created after a transcript mark")
     events_wait.add_argument("--all-sessions", action="store_true", help="With --since-mark, wait for events from any session after that mark")
     events_wait.add_argument("--from-now", action="store_true", help="Wait only for events created after invocation")
-    events_wait.add_argument("--ack", action="store_true", help="Ack the event before returning")
+    events_wait.add_argument("--no-ack", dest="ack", action="store_false", help="Do not ack the event (default: ack on return)")
     events_wait.add_argument("--json", action="store_true")
     events_wait.add_argument("--quiet", action="store_true")
-    events_wait.set_defaults(func=events_cmd)
+    events_wait.set_defaults(func=events_cmd, ack=True)
     events_ack = events_sub.add_parser("ack", help="Acknowledge an event for a consumer")
     events_ack.add_argument("event_id")
     events_ack.add_argument("--consumer", help="Consumer name")
