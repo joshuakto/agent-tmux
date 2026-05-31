@@ -84,6 +84,8 @@ agent-tmux log stop <session>
 agent-tmux mark <session> --label before-action
 ```
 
+Like `prompt`, `mark` prints the bare mark id on stdout (receipt to stderr), so `MARK=$(agent-tmux mark <session>)` captures just the id with no flag or `jq`; pass `--json` for the full receipt.
+
 Logs and marks are navigation aids. Task completion still comes from artifacts, tests, commits, process exit status, and explicit reports.
 
 ## Layout Recovery

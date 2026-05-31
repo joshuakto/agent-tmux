@@ -10,6 +10,7 @@ them fails loudly instead of silently breaking the loop.
 from __future__ import annotations
 
 import importlib.util
+import inspect
 import json
 import subprocess
 import sys
@@ -69,6 +70,16 @@ with tempfile.TemporaryDirectory() as d:
     ph = helptext("prompt", cwd=d)
     check("prompt has --report-back-topic, dropped --print-mark/--quiet", "--report-back-topic" in ph and "--print-mark" not in ph and "--quiet" not in ph)
     check("launch has --json", "--json" in helptext("launch", cwd=d))
+
+# --- stdout-capture contract: id-producing commands print a bare, capturable id
+# on stdout (receipt to stderr), so MARK=$(...) works with no --json/jq. prompt
+# established this; mark must match it or the standalone-mark path breaks silently. ---
+mark_src = inspect.getsource(m.mark_cmd)
+mark_else = mark_src.split("else:", 1)[-1]
+check(
+    "mark prints bare id on stdout, receipt to stderr (matches prompt)",
+    "print(mark_id)" in mark_else and "file=sys.stderr" in mark_else,
+)
 
 print(f"\n{len(_failures)} failure(s): {', '.join(_failures)}" if _failures else "\nAll smoke checks passed.")
 sys.exit(1 if _failures else 0)
