@@ -12,18 +12,23 @@ Use the canonical supervised worker loop in skills/shared-tmux-terminal/SKILL.md
 2. Reuse only an obvious live match. Otherwise launch a fresh named session with native event wiring:
    agent-tmux launch --session <name> --require-events --purpose <purpose> --run "<native-hook cli>" --log
 3. Relay the launch receipt's session name and attach command to the human.
-4. Send work with prompt. The instruction must tell the worker to post a board memo when finished or blocked.
+4. Send work with prompt. Use --report-back-topic <topic> to automatically inject the board-post instruction; the worker is told to post when finished or blocked.
+   MARK=$(agent-tmux prompt <session> "<task>" --report-back-topic <topic> --print-mark)
 5. Use the mark returned by prompt as the event cursor; with --since-mark, the session is inferred.
-6. If the event is board_post, read the memo using the event's message_id.
+6. If the event is board_post, .board_body in the JSON output contains the stripped memo body directly.
 7. Use transcript reads only for recovery or evidence:
-   agent-tmux read <session> --since-mark <mark-id> --lines 120
+   agent-tmux read --since-mark <mark-id> --lines 120
 8. If the session seems missing or socket access fails:
    agent-tmux doctor --question "<what looked wrong>" --context "<what you were doing>"
 9. If a human wants to inspect:
    agent-tmux attach
 
 `prompt` infers the agent profile from the session registry. `--agent` is inferred at launch for recognized binaries; pass it only to override.
+`--report-back-topic` appends a standard board-post instruction; `--print-mark` outputs only the mark id (use `--json | jq -r .mark` when you also need receipt fields).
+`events wait` acks the returned event by default; pass `--no-ack` to suppress.
+`events wait` exits 0 for both event-found and timeout; exits non-zero only on errors. Check `.kind` (not `$?`) to detect timeout — this keeps `set -e` scripts safe.
 `events wait` and `events list` default to the manager attention set (`board_post,needs_input,permission_request,agent_stop,hook_error`). Pass `--kind all` to widen, or `--kind <list>` to narrow.
+For `board_post` events, `--json` output includes `.board_body` with the stripped memo body; no separate `board read` call needed.
 Do not treat logs, marks, or wait output as task truth.
 Task truth comes from artifacts, tests, commits, process exit status, and explicit reports.
 `prompt` keeps text and submit together even when multiple prompts are sent concurrently.

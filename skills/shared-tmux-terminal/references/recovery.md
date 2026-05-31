@@ -29,8 +29,8 @@ agent-tmux doctor --question "<what looked wrong>" --context "<what you were doi
 Prefer mark/new-output reads first:
 
 ```bash
-agent-tmux read <session> --since-mark <mark-id> --lines 120
-agent-tmux wait <session> "<pattern>" --since-mark <mark-id> --timeout 300
+agent-tmux read --since-mark <mark-id> --lines 120
+agent-tmux wait --since-mark <mark-id> "<pattern>" --timeout 300
 agent-tmux wait <session> "<pattern>" --from-now --timeout 300
 ```
 
@@ -48,7 +48,7 @@ agent-tmux dump <session> --all
 ## Stuck Or Wrong Process
 
 ```bash
-agent-tmux read <session> --since-mark <mark-id> --lines 120
+agent-tmux read --since-mark <mark-id> --lines 120
 agent-tmux search <session> "error|failed|permission|approval" --ignore-case --context 3
 agent-tmux interrupt <session>
 ```
