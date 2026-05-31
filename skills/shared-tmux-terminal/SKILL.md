@@ -26,9 +26,9 @@ Supervised worker loop. Use `agent-tmux` (or `.agent/tmux` if the wrapper is ins
 agent-tmux launch --session reviewer --purpose "review" --require-events --run "claude --name reviewer" --log
 
 # 2. Send task; --report-back-topic injects the board-post instruction automatically.
-#    --print-mark outputs only the mark id so no jq is needed.
+#    prompt prints the mark id on stdout, so MARK=$(...) needs no flag or jq.
 TASK='<task>'
-MARK=$(agent-tmux prompt reviewer "$TASK" --report-back-topic <topic> --print-mark)
+MARK=$(agent-tmux prompt reviewer "$TASK" --report-back-topic <topic>)
 
 # 3. Wait for the next attention event after the mark. Session is inferred; event is acked automatically.
 #    events wait exits 0 for both event-found and timeout; branch on .kind.
@@ -44,7 +44,7 @@ esac
 ```
 
 - **`--report-back-topic <topic>`** appends `When you have completed this task or become blocked, post a board memo: agent-tmux board post --topic <topic> "<concise status>"` to the task text. The worker sees the instruction as part of its prompt; the manager never has to compose it manually.
-- **`--print-mark`** outputs only the mark id. Use `--json | jq -r .mark` when you also need `profile`, `submitted`, or `warning` from the receipt.
+- **`prompt` prints the mark id on stdout** (your event cursor); the human receipt and any submit warning go to stderr, so `MARK=$(agent-tmux prompt …)` captures just the mark. Pass `--json` for the full receipt (`profile`, `submitted`, `warning`, …).
 - **Receipt JSON:** `{mark, profile, report_back_topic, session, submitted, target}`; `.mark` is your event cursor.
 - **Event JSON:** use `.kind`; for `board_post`, `.board_body` contains the stripped memo body (no extra `board read` call needed). `events wait` acks the returned event by default; pass `--no-ack` to suppress.
 - **Recognized `--run` basenames** (`--agent` auto-inferred): `claude`, `codex`, `opencode`, `pi`, `gemini`. `--require-events` succeeds only for native-hook profiles (`claude`, `codex`, `opencode`, `pi`) — see `references/wiring-internals.md`.

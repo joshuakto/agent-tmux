@@ -2556,16 +2556,17 @@ def prompt_cmd(args: argparse.Namespace) -> int:
         receipt["report_back_topic"] = report_back_topic
     if warning:
         receipt["warning"] = warning
-    if getattr(args, "print_mark", False):
-        print(mark_id or "")
-    elif args.json:
+    if args.json:
         print(json.dumps(receipt, sort_keys=True))
-    elif not args.quiet:
-        suffix = f" mark={mark_id}" if mark_id else ""
+    else:
+        # Default: the mark id (the event cursor) on stdout, so MARK=$(prompt ...) just
+        # works with no flag; the human receipt and any submit warning go to stderr.
+        if mark_id:
+            print(mark_id)
         rbt = f" report_back_topic={report_back_topic}" if report_back_topic else ""
-        print(f"prompt sent: target={target} profile={profile_name} submitted={'yes' if args.submit else 'no'}{suffix}{rbt}")
+        print(f"prompt sent: target={target} profile={profile_name} submitted={'yes' if args.submit else 'no'}{rbt}", file=sys.stderr)
         if warning:
-            print(f"warning: {warning}")
+            print(f"warning: {warning}", file=sys.stderr)
     return 0
 
 
@@ -3457,9 +3458,7 @@ def parser() -> argparse.ArgumentParser:
         metavar="TOPIC",
         help="Append a standard board-post instruction. The worker is told to post a memo to this topic when done or blocked.",
     )
-    prompt.add_argument("--print-mark", action="store_true", help="Print only the mark id (no other output); useful in scripts that assign the mark directly without jq")
-    prompt.add_argument("--quiet", action="store_true")
-    prompt.add_argument("--json", action="store_true", help="Emit a machine-readable receipt")
+    prompt.add_argument("--json", action="store_true", help="Emit the full receipt as JSON on stdout instead of the bare mark id")
     prompt.set_defaults(func=prompt_cmd, submit=True, mark=True)
 
     mark = command("mark", help="Create a transcript mark for a session or pane")

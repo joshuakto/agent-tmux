@@ -13,7 +13,7 @@ Use the canonical supervised worker loop in skills/shared-tmux-terminal/SKILL.md
    agent-tmux launch --session <name> --require-events --purpose <purpose> --run "<native-hook cli>" --log
 3. Relay the launch receipt's session name and attach command to the human.
 4. Send work with prompt. Use --report-back-topic <topic> to automatically inject the board-post instruction; the worker is told to post when finished or blocked.
-   MARK=$(agent-tmux prompt <session> "<task>" --report-back-topic <topic> --print-mark)
+   MARK=$(agent-tmux prompt <session> "<task>" --report-back-topic <topic>)
 5. Use the mark returned by prompt as the event cursor; with --since-mark, the session is inferred.
 6. If the event is board_post, .board_body in the JSON output contains the stripped memo body directly.
 7. Use transcript reads only for recovery or evidence:
@@ -24,7 +24,7 @@ Use the canonical supervised worker loop in skills/shared-tmux-terminal/SKILL.md
    agent-tmux attach
 
 `prompt` infers the agent profile from the session registry. `--agent` is inferred at launch for recognized binaries; pass it only to override.
-`--report-back-topic` appends a standard board-post instruction; `--print-mark` outputs only the mark id (use `--json | jq -r .mark` when you also need receipt fields).
+`--report-back-topic` appends a standard board-post instruction; `prompt` prints the mark id on stdout (receipt + warning go to stderr), so `MARK=$(agent-tmux prompt …)` needs no flag. Pass `--json` for the full receipt.
 `events wait` acks the returned event by default; pass `--no-ack` to suppress.
 `events wait` exits 0 for both event-found and timeout; exits non-zero only on errors. Check `.kind` (not `$?`) to detect timeout — this keeps `set -e` scripts safe.
 `events wait` and `events list` default to the manager attention set (`board_post,needs_input,permission_request,agent_stop,hook_error`). Pass `--kind all` to widen, or `--kind <list>` to narrow.
