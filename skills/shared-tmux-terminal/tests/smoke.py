@@ -67,7 +67,7 @@ with tempfile.TemporaryDirectory() as d:
     ew = helptext("events", "wait", cwd=d)
     check("events wait defaults to ack (--no-ack present, bare --ack absent)", "--no-ack" in ew and "--ack" not in ew)
     ph = helptext("prompt", cwd=d)
-    check("prompt has --report-back-topic and --print-mark", "--report-back-topic" in ph and "--print-mark" in ph)
+    check("prompt has --report-back-topic, dropped --print-mark/--quiet", "--report-back-topic" in ph and "--print-mark" not in ph and "--quiet" not in ph)
     check("launch has --json", "--json" in helptext("launch", cwd=d))
 
 print(f"\n{len(_failures)} failure(s): {', '.join(_failures)}" if _failures else "\nAll smoke checks passed.")
