@@ -2594,10 +2594,10 @@ def mark_cmd(args: argparse.Namespace) -> int:
     if getattr(args, "json", False):
         print(json.dumps({"mark": mark_id, "session": mark["session"], "target": mark["target"], "log": mark["log_path"], "offset": mark["offset"]}, sort_keys=True))
     else:
-        print(f"mark created: {mark_id}")
-        print(f"target: {mark['target']}")
-        print(f"log: {mark['log_path']}")
-        print(f"offset: {mark['offset']}")
+        # Default: the bare mark id (the event cursor) on stdout, so MARK=$(mark ...)
+        # just works with no flag or jq, mirroring prompt; the receipt goes to stderr.
+        print(mark_id)
+        print(f"mark created: target={mark['target']} log={mark['log_path']} offset={mark['offset']}", file=sys.stderr)
     return 0
 
 
