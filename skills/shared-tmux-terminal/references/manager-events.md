@@ -66,6 +66,8 @@ Pass `--kind all` (or an explicit list) to surface these.
 
 ## Manager Branches
 
+The entries below are the decision to make *after* the golden path's `*` branch reads the transcript — one per event kind.
+
 - `board_post`: with `--json`, `.board_body` contains the stripped memo body directly; or call `board read <message-id>` from the event's `.message_id`.
 - `needs_input`: inspect recent output or ask the human for the missing input.
 - `permission_request`: surface the decision; never auto-approve.
