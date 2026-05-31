@@ -685,6 +685,17 @@ def board_body_from_text(text: str) -> str | None:
     return text.strip() or None
 
 
+def enrich_event(event: dict[str, Any]) -> dict[str, Any]:
+    """For board_post events, embed the stripped memo body as .board_body."""
+    if event.get("kind") == "board_post":
+        path_str = event.get("path")
+        if path_str:
+            body = board_body_from_text(Path(path_str).read_text(errors="replace"))
+            if body is not None:
+                return {**event, "board_body": body}
+    return event
+
+
 def list_board_messages(root: Path, *, topic: str | None = None) -> list[dict[str, str]]:
     base = board_root(root) / "threads"
     if not base.exists():
@@ -2699,16 +2710,7 @@ def events_cmd(args: argparse.Namespace) -> int:
         if args.limit and len(events) > args.limit:
             events = events[-args.limit :]
         if args.json:
-            enriched = []
-            for ev in events:
-                if ev.get("kind") == "board_post":
-                    path_str = ev.get("path")
-                    if path_str:
-                        body = board_body_from_text(Path(path_str).read_text(errors="replace"))
-                        if body is not None:
-                            ev = {**ev, "board_body": body}
-                enriched.append(ev)
-            print(json.dumps(enriched, sort_keys=True))
+            print(json.dumps([enrich_event(ev) for ev in events], sort_keys=True))
             return 0
         for event in events:
             print_event(event)
@@ -2733,12 +2735,8 @@ def events_cmd(args: argparse.Namespace) -> int:
                 event = events[0]
                 if args.ack:
                     ack_event(root, event["id"], consumer)
-                if args.json and event.get("kind") == "board_post":
-                    path_str = event.get("path")
-                    if path_str:
-                        body = board_body_from_text(Path(path_str).read_text(errors="replace"))
-                        if body is not None:
-                            event = {**event, "board_body": body}
+                if args.json:
+                    event = enrich_event(event)
                 print_event(event, json_output=args.json)
                 return 0
             if time.monotonic() >= deadline:
