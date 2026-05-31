@@ -39,7 +39,7 @@ KIND=$(echo "$EVENT" | jq -r .kind)
 case "$KIND" in
   board_post)  echo "$EVENT" | jq -r '.board_body // empty' ;;  # body embedded; or: board read $(jq -r .message_id)
   hook_error)  agent-tmux hooks status reviewer ;;
-  *)           agent-tmux read --since-mark "$MARK" ;;  # needs_input, permission_request, agent_stop, timeout
+  *)           agent-tmux read --since-mark "$MARK" ;;  # needs_input; permission_request: never auto-approve, surface; agent_stop; timeout
 esac
 ```
 
