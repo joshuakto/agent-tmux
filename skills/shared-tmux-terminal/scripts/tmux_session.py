@@ -1560,12 +1560,20 @@ def send_profile_action(socket: Path, target: str, profile: dict[str, Any], acti
     run_tmux(socket, ["send-keys", "-t", target, *keys])
 
 
+# Socket override (--socket) for the current invocation, set in main(). Commands we
+# print or inject into a worker must carry the same --socket, or a copy-pasted or
+# worker-run command would target the default socket instead of the active one.
+_invocation_socket_override: str | None = None
+
+
 def user_command(root: Path, args: str) -> str:
     wrapper = root / ".agent" / "tmux"
     if wrapper.exists():
         command = shlex.quote(str(wrapper))
     else:
         command = f"agent-tmux --cwd {shlex.quote(str(root))}"
+    if _invocation_socket_override:
+        command += f" --socket {shlex.quote(_invocation_socket_override)}"
     return f"{command} {args}".rstrip()
 
 
@@ -3645,7 +3653,9 @@ def parser() -> argparse.ArgumentParser:
 
 
 def main() -> int:
+    global _invocation_socket_override
     args = parser().parse_args()
+    _invocation_socket_override = getattr(args, "socket", None)
     require_tmux_version()
     if getattr(args, "cmd", None) == "launch":
         try:
