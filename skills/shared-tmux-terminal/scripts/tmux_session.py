@@ -2519,6 +2519,27 @@ def prompt_submit_warning(root: Path, registry: dict[str, Any], session: str, ma
     )
 
 
+def emit_capturable_id(
+    mark_id: str | None,
+    receipt: dict[str, Any],
+    receipt_line: str,
+    *,
+    as_json: bool,
+    extra_stderr: tuple[str, ...] = (),
+) -> None:
+    """Emit an id-producing command's result. Default: the bare mark id (the event
+    cursor) on stdout so MARK=$(...) captures just it, with the human receipt on
+    stderr. With --json: the full receipt on stdout. Shared by prompt and mark."""
+    if as_json:
+        print(json.dumps(receipt, sort_keys=True))
+        return
+    if mark_id:
+        print(mark_id)
+    print(receipt_line, file=sys.stderr)
+    for line in extra_stderr:
+        print(line, file=sys.stderr)
+
+
 def prompt_cmd(args: argparse.Namespace) -> int:
     root = project_root(Path(args.cwd) if args.cwd else None)
     socket = socket_path(root, args.socket)
@@ -2567,17 +2588,12 @@ def prompt_cmd(args: argparse.Namespace) -> int:
         receipt["report_back_topic"] = report_back_topic
     if warning:
         receipt["warning"] = warning
-    if args.json:
-        print(json.dumps(receipt, sort_keys=True))
-    else:
-        # Default: the mark id (the event cursor) on stdout, so MARK=$(prompt ...) just
-        # works with no flag; the human receipt and any submit warning go to stderr.
-        if mark_id:
-            print(mark_id)
-        rbt = f" report_back_topic={report_back_topic}" if report_back_topic else ""
-        print(f"prompt sent: target={target} profile={profile_name} submitted={'yes' if args.submit else 'no'}{rbt}", file=sys.stderr)
-        if warning:
-            print(f"warning: {warning}", file=sys.stderr)
+    rbt = f" report_back_topic={report_back_topic}" if report_back_topic else ""
+    receipt_line = f"prompt sent: target={target} profile={profile_name} submitted={'yes' if args.submit else 'no'}{rbt}"
+    emit_capturable_id(
+        mark_id, receipt, receipt_line, as_json=args.json,
+        extra_stderr=(f"warning: {warning}",) if warning else (),
+    )
     return 0
 
 
@@ -2591,13 +2607,9 @@ def mark_cmd(args: argparse.Namespace) -> int:
     mark_id, mark, changed = create_mark(root, socket, registry, args.session, target, label=args.label)
     if changed:
         save_registry_session(registry_file, registry, session_name_from_target(args.session, target))
-    if getattr(args, "json", False):
-        print(json.dumps({"mark": mark_id, "session": mark["session"], "target": mark["target"], "log": mark["log_path"], "offset": mark["offset"]}, sort_keys=True))
-    else:
-        # Default: the bare mark id (the event cursor) on stdout, so MARK=$(mark ...)
-        # just works with no flag or jq, mirroring prompt; the receipt goes to stderr.
-        print(mark_id)
-        print(f"mark created: target={mark['target']} log={mark['log_path']} offset={mark['offset']}", file=sys.stderr)
+    receipt = {"mark": mark_id, "session": mark["session"], "target": mark["target"], "log": mark["log_path"], "offset": mark["offset"]}
+    receipt_line = f"mark created: target={mark['target']} log={mark['log_path']} offset={mark['offset']}"
+    emit_capturable_id(mark_id, receipt, receipt_line, as_json=getattr(args, "json", False))
     return 0
 
 
