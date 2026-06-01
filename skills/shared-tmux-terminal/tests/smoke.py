@@ -67,14 +67,14 @@ with tempfile.TemporaryDirectory() as d:
 
     # --- flag-contract guards (cheap regression catch) ---
     ew = helptext("events", "wait", cwd=d)
-    check("events wait does not ack by default (--ack opt-in, --no-ack gone, --unread present)", "--ack" in ew and "--no-ack" not in ew and "--unread" in ew)
+    check("events wait has no ack/unread/consumer flags (subsystem removed), keeps --since-mark", "--ack" not in ew and "--unread" not in ew and "--consumer" not in ew and "--since-mark" in ew)
     ph = helptext("prompt", cwd=d)
     check("prompt has --report-back-topic, dropped --print-mark/--quiet", "--report-back-topic" in ph and "--print-mark" not in ph and "--quiet" not in ph)
     check("launch has --json", "--json" in helptext("launch", cwd=d))
 
-# --- #33: events wait is idempotent by default, its timeout is informative, and
-# drain semantics remain available via opt-in. Guards the manager-loop contract:
-# a repeated wait must not turn a real event into a misleading "stalled" timeout. ---
+# --- #33: events wait is idempotent (the mark cursor is the sole dedup) and its
+# timeout is informative. Guards the manager-loop contract: a repeated wait must
+# not turn a real event into a misleading "stalled" timeout. ---
 with tempfile.TemporaryDirectory() as d:
     def wait_kind(*extra: str) -> str:
         return json.loads(run("events", "wait", "--timeout", "1", "--json", *extra, cwd=d).stdout).get("kind")
@@ -99,10 +99,10 @@ with tempfile.TemporaryDirectory() as d:
     tp = json.loads(run("events", "wait", "--kind", "board_post", "--topic", "sometopic", "--session", "topicy", "--timeout", "1", "--json", cwd=d).stdout)
     check("events wait timeout is not topic-scoped (surfaces topic-less attention events)", tp.get("events_after_cursor", 0) >= 1 and "agent_stop" in (tp.get("kinds_after_cursor") or {}))
 
-    run("events", "emit", "--kind", "board_post", "--session", "drain", "--summary", "x", cwd=d)
-    d1 = wait_kind("--kind", "board_post", "--session", "drain", "--unread", "--ack")
-    d2 = wait_kind("--kind", "board_post", "--session", "drain", "--unread")
-    check("events wait --unread --ack drains (next --unread wait times out)", d1 == "board_post" and d2 == "timeout")
+    # the ack/consumer/unread subsystem is removed: the mark cursor is the sole dedup
+    check("events ack subcommand removed", run("events", "ack", "evt_x", cwd=d).returncode != 0)
+    check("events list --unread flag removed", run("events", "list", "--unread", cwd=d).returncode != 0)
+    check("events wait --ack flag removed", run("events", "wait", "--ack", "--timeout", "1", cwd=d).returncode != 0)
 
 # --- stdout-capture contract (behavioral): emit_capturable_id() — shared by prompt
 # and mark — must put the bare id on stdout (so MARK=$(...) captures just it) and the
