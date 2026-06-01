@@ -1,0 +1,13 @@
+{
+  "name": "agent-tmux",
+  "owner": {
+    "name": "Joshua Ching"
+  },
+  "plugins": [
+    {
+      "name": "agent-tmux",
+      "source": "./",
+      "description": "Shared tmux terminal management for human-visible terminal agents"
+    }
+  ]
+}

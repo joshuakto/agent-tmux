@@ -59,7 +59,7 @@ Events are wakeups for the manager agent. Board posts are durable memos. Neither
 - one-file-per-message board memos under `.agent/board/`
 - session-local native hook ingestion for Claude Code, Codex CLI, OpenCode, and Pi
 - a project wrapper at `.agent/tmux`
-- Claude Code plugin metadata at `.claude-plugin/plugin.json`
+- Claude Code plugin metadata at `.claude-plugin/plugin.json` and marketplace metadata at `.claude-plugin/marketplace.json`
 - Codex skill metadata under `skills/shared-tmux-terminal`
 
 ## Basic Shared Terminal Path
@@ -119,7 +119,7 @@ The socket, registry, marks, events, doctor events, dumps, transcripts, hooks, a
 
 ## Claude Code Plugin
 
-Claude Code auto-discovers skills from personal skills, project skills, and installed plugins. This repository is also a Claude Code plugin: it has `.claude-plugin/plugin.json`, `skills/shared-tmux-terminal/SKILL.md`, and `bin/agent-tmux`.
+Claude Code auto-discovers skills from personal skills, project skills, and installed plugins. This repository is also a Claude Code plugin: it has `.claude-plugin/plugin.json`, `skills/shared-tmux-terminal/SKILL.md`, and `bin/agent-tmux`. It also ships `.claude-plugin/marketplace.json` so it can be added as a single-plugin marketplace.
 
 For local testing:
 
