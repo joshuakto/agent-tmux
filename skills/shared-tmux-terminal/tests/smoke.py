@@ -67,10 +67,42 @@ with tempfile.TemporaryDirectory() as d:
 
     # --- flag-contract guards (cheap regression catch) ---
     ew = helptext("events", "wait", cwd=d)
-    check("events wait defaults to ack (--no-ack present, bare --ack absent)", "--no-ack" in ew and "--ack" not in ew)
+    check("events wait does not ack by default (--ack opt-in, --no-ack gone, --unread present)", "--ack" in ew and "--no-ack" not in ew and "--unread" in ew)
     ph = helptext("prompt", cwd=d)
     check("prompt has --report-back-topic, dropped --print-mark/--quiet", "--report-back-topic" in ph and "--print-mark" not in ph and "--quiet" not in ph)
     check("launch has --json", "--json" in helptext("launch", cwd=d))
+
+# --- #33: events wait is idempotent by default, its timeout is informative, and
+# drain semantics remain available via opt-in. Guards the manager-loop contract:
+# a repeated wait must not turn a real event into a misleading "stalled" timeout. ---
+with tempfile.TemporaryDirectory() as d:
+    def wait_kind(*extra: str) -> str:
+        return json.loads(run("events", "wait", "--timeout", "1", "--json", *extra, cwd=d).stdout).get("kind")
+
+    run("events", "emit", "--kind", "board_post", "--session", "rev", "--summary", "done", cwd=d)
+    k1 = wait_kind("--kind", "board_post", "--session", "rev")
+    k2 = wait_kind("--kind", "board_post", "--session", "rev")
+    check("events wait is idempotent (repeat wait still returns the event, not a stale timeout)", k1 == "board_post" and k2 == "board_post")
+
+    run("events", "emit", "--kind", "agent_stop", "--session", "solo", "--summary", "stopped", cwd=d)
+    t = json.loads(run("events", "wait", "--kind", "board_post", "--session", "solo", "--timeout", "1", "--json", cwd=d).stdout)
+    check(
+        "events wait timeout is informative (reports attention events after the cursor)",
+        t.get("kind") == "timeout" and t.get("events_after_cursor", 0) >= 1 and "agent_stop" in (t.get("kinds_after_cursor") or {}),
+    )
+    g = json.loads(run("events", "wait", "--kind", "board_post", "--session", "ghost", "--timeout", "1", "--json", cwd=d).stdout)
+    check("events wait timeout reports 0 after-cursor events when nothing landed", g.get("kind") == "timeout" and g.get("events_after_cursor") == 0)
+
+    # a --topic wait must still surface topic-less attention events on timeout,
+    # else it re-introduces the #33 false "stalled" reading for topic-scoped waits
+    run("events", "emit", "--kind", "agent_stop", "--session", "topicy", "--summary", "stopped", cwd=d)
+    tp = json.loads(run("events", "wait", "--kind", "board_post", "--topic", "sometopic", "--session", "topicy", "--timeout", "1", "--json", cwd=d).stdout)
+    check("events wait timeout is not topic-scoped (surfaces topic-less attention events)", tp.get("events_after_cursor", 0) >= 1 and "agent_stop" in (tp.get("kinds_after_cursor") or {}))
+
+    run("events", "emit", "--kind", "board_post", "--session", "drain", "--summary", "x", cwd=d)
+    d1 = wait_kind("--kind", "board_post", "--session", "drain", "--unread", "--ack")
+    d2 = wait_kind("--kind", "board_post", "--session", "drain", "--unread")
+    check("events wait --unread --ack drains (next --unread wait times out)", d1 == "board_post" and d2 == "timeout")
 
 # --- stdout-capture contract (behavioral): emit_capturable_id() — shared by prompt
 # and mark — must put the bare id on stdout (so MARK=$(...) captures just it) and the

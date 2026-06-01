@@ -25,7 +25,7 @@ Use the canonical supervised worker loop in skills/shared-tmux-terminal/SKILL.md
 
 `prompt` infers the agent profile from the session registry. `--agent` is inferred at launch for recognized binaries; pass it only to override.
 `--report-back-topic` appends a standard board-post instruction; `prompt` prints the mark id on stdout (receipt + warning go to stderr), so `MARK=$(agent-tmux prompt …)` needs no flag. Pass `--json` for the full receipt.
-`events wait` acks the returned event by default; pass `--no-ack` to suppress.
+`events wait` is idempotent: it does not ack (the prompt mark is your cursor), so re-running with the same mark returns the same event. On timeout, `--json` adds `.events_after_cursor`/`.kinds_after_cursor` to distinguish a stalled worker (0) from one that finished with a different event kind (>0). For drain-style consumption, add `--unread --ack`.
 `events wait` exits 0 for both event-found and timeout; exits non-zero only on errors. Check `.kind` (not `$?`) to detect timeout — this keeps `set -e` scripts safe.
 `events wait` and `events list` default to the manager attention set (`board_post,needs_input,permission_request,agent_stop,hook_error`). Pass `--kind all` to widen, or `--kind <list>` to narrow.
 For `board_post` events, `--json` output includes `.board_body` with the stripped memo body; no separate `board read` call needed.
