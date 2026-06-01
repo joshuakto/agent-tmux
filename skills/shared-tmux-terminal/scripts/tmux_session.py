@@ -3681,5 +3681,19 @@ def main() -> int:
         return 2
 
 
+def run_cli() -> int:
+    try:
+        return main()
+    except BrokenPipeError:
+        # The reader closed the pipe early (e.g. `agent-tmux report | head`).
+        # Match standard CLI behavior: exit cleanly with no traceback. Point
+        # stdout at /dev/null so the interpreter's final flush on shutdown does
+        # not re-raise. Agents pipe capture output constantly; a stack trace
+        # here is noise that looks like a tool failure.
+        with contextlib.suppress(Exception):
+            os.dup2(os.open(os.devnull, os.O_WRONLY), sys.stdout.fileno())
+        return 0
+
+
 if __name__ == "__main__":
-    raise SystemExit(main())
+    raise SystemExit(run_cli())

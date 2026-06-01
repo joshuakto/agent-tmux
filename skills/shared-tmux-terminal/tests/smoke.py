@@ -90,5 +90,23 @@ check(
     json.loads(_out.getvalue()).get("mark") == "m_x",
 )
 
+# --- broken-pipe guard: closing the reader (e.g. `agent-tmux report | head`)
+# must exit 0 with no traceback, not crash with BrokenPipeError. run_cli()
+# converts a BrokenPipeError raised anywhere in dispatch into a clean exit. ---
+def _boom():
+    raise BrokenPipeError()
+
+
+_orig_main = m.main
+m.main = _boom
+try:
+    # redirect_stdout points sys.stdout at a StringIO (no real fd), so run_cli's
+    # devnull dup2 is harmlessly suppressed and the test's own stdout survives.
+    with contextlib.redirect_stdout(io.StringIO()):
+        _rc = m.run_cli()
+finally:
+    m.main = _orig_main
+check("run_cli converts BrokenPipeError to clean exit 0", _rc == 0)
+
 print(f"\n{len(_failures)} failure(s): {', '.join(_failures)}" if _failures else "\nAll smoke checks passed.")
 sys.exit(1 if _failures else 0)
