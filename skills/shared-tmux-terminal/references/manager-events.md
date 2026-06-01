@@ -10,7 +10,7 @@ In the SKILL loop, replace the launch command's `--run` value for native-hook CL
 With `--since-mark`, session is inferred from the mark. Add `--all-sessions` only when you need the next event from any session after that mark.
 
 `prompt` infers the agent profile from the session registry. At launch, `--agent` is usually inferred from recognized `--run` binaries.
-Events are small wakeups for the manager agent. Use the mark printed by `prompt` as the event cursor so stale unread events from earlier turns are ignored. Events are not task truth.
+Events are small wakeups for the manager agent. Use the mark printed by `prompt` as the event cursor so stale events from earlier turns are ignored. Events are not task truth.
 
 ## Event JSON Fields
 
@@ -30,9 +30,8 @@ To widen, pass `--kind all`. To narrow, pass an explicit comma-separated list (e
 
 ```bash
 agent-tmux events emit --kind needs_input --session reviewer --summary "Need a decision"
-agent-tmux events list --unread
-agent-tmux events wait --since-mark <mark-id> --timeout 1800        # acks by default; pass --no-ack to suppress
-agent-tmux events ack <event-id>
+agent-tmux events list --since-mark <mark-id>
+agent-tmux events wait --since-mark <mark-id> --timeout 1800        # idempotent; re-running returns the same event
 ```
 
 Use `--json` on `events wait` or `events list` when a manager agent needs machine-readable output.
@@ -73,7 +72,7 @@ The entries below are the decision to make *after* the golden path's `*` branch 
 - `permission_request`: surface the decision; never auto-approve.
 - `agent_stop`: if no memo arrived, read recent output or prompt the worker to post one.
 - `hook_error`: run `hooks status` or `doctor`.
-- `timeout`: `events wait --json` emits `{"kind":"timeout","session":...}` on timeout and exits 0. Read recent output or re-prompt. Do not check `$?` to detect timeout; check `.kind` instead — this keeps `set -e` scripts safe.
+- `timeout`: `events wait --json` emits `{"kind":"timeout","session":...,"events_after_cursor":N,"kinds_after_cursor":{...}}` on timeout and exits 0. `events_after_cursor == 0` means nothing actionable landed after the cursor (worker still working or stalled — re-prompt or read output); `> 0` means attention events you weren't waiting on landed (inspect them with `events list --since-mark <mark>`). The count spans the whole attention set and is not topic-scoped, so a `--topic` wait still surfaces topic-less signals like `needs_input`. Do not check `$?` to detect timeout; check `.kind` instead — this keeps `set -e` scripts safe.
 
 Use `read`, `wait`, `search`, and `attach` only for recovery, inherited sessions, or evidence checks.
 
@@ -81,7 +80,7 @@ Use `read`, `wait`, `search`, and `attach` only for recovery, inherited sessions
 
 Practical edges from real multi-agent runs:
 
-- Use `prompt` marks as the event cursor. `events wait --since-mark <mark-id>` prevents stale unread hook events from waking the manager after a new prompt. `events wait` acks the returned event by default; pass `--no-ack` if you need to ack later.
+- Use `prompt` marks as the event cursor. `events wait --since-mark <mark-id>` excludes earlier-turn events, so the wait is idempotent — re-running after the same prompt returns the same event instead of a misleading "stalled" timeout. The mark is the sole cursor; to advance past an event, capture a new mark from the next `prompt`/`mark` rather than re-using the old one.
 - Parallel `prompt` calls are safe across sessions and serialized per target pane, so text and submit keys are not interleaved.
 - Treat native events as wakeups, not conclusions. Verify task truth from artifacts, commits, process status, and explicit board memos.
 - Keep persistence policy outside `agent-tmux`. The project should say where durable artifacts live; for Colab experiments, GitHub branches were more reliable than Drive because Drive auth can require interactive credentials.

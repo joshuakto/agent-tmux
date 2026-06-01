@@ -213,10 +213,6 @@ def events_dir(root: Path) -> Path:
     return root / ".agent" / "tmux.d" / "events" / "events"
 
 
-def events_ack_dir(root: Path) -> Path:
-    return root / ".agent" / "tmux.d" / "events" / "acks"
-
-
 def board_root(root: Path) -> Path:
     return root / ".agent" / "board"
 
@@ -542,8 +538,6 @@ def list_events(
     session: str | None = None,
     kind: str | None = None,
     topic: str | None = None,
-    unread: bool = False,
-    consumer: str | None = None,
     since_created_at: str | None = None,
 ) -> list[dict[str, Any]]:
     directory = events_dir(root)
@@ -558,8 +552,6 @@ def list_events(
         if not event_matches_filters(event, session=session, kinds=kinds, topic=topic):
             continue
         if since_created_at and str(event.get("created_at", "")) <= since_created_at:
-            continue
-        if unread and event_is_acked(root, event["id"], consumer):
             continue
         entries.append(event)
     return sorted(entries, key=lambda event: (str(event.get("created_at", "")), str(event.get("id", ""))))
@@ -592,54 +584,6 @@ def event_matches_filters(
     if topic and event.get("topic") != topic:
         return False
     return True
-
-
-CONSUMER_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9_-]*$")
-_default_consumer_warned = False
-
-
-def validate_consumer_name(name: str, *, source: str) -> str:
-    if not CONSUMER_NAME_RE.match(name):
-        raise SystemExit(
-            f"invalid consumer name {name!r} from {source}: must match {CONSUMER_NAME_RE.pattern}. "
-            "Pass --consumer with a slug-safe name to override."
-        )
-    return name
-
-
-def _warn_default_consumer_once() -> None:
-    global _default_consumer_warned
-    if _default_consumer_warned:
-        return
-    _default_consumer_warned = True
-    print(
-        "events: defaulting to consumer=manager; pass --consumer or AGENT_TMUX_CONSUMER to avoid sharing acks",
-        file=sys.stderr,
-    )
-
-
-def default_consumer(session: str | None = None) -> str:
-    env = os.environ.get("AGENT_TMUX_CONSUMER")
-    if env:
-        return validate_consumer_name(env, source="AGENT_TMUX_CONSUMER")
-    if session:
-        return validate_consumer_name(session, source="session")
-    _warn_default_consumer_once()
-    return "manager"
-
-
-def ack_path(root: Path, event_id: str, consumer: str) -> Path:
-    return events_ack_dir(root) / slugify(consumer) / f"{slugify(event_id)}.ack"
-
-
-def event_is_acked(root: Path, event_id: str, consumer: str) -> bool:
-    return ack_path(root, event_id, consumer).exists()
-
-
-def ack_event(root: Path, event_id: str, consumer: str) -> Path:
-    path = ack_path(root, event_id, consumer)
-    atomic_write_text(path, json.dumps({"event_id": event_id, "consumer": consumer, "acked_at": now_iso()}, sort_keys=True) + "\n")
-    return path
 
 
 def print_event(event: dict[str, Any], *, json_output: bool = False) -> None:
@@ -2643,13 +2587,6 @@ def profiles_cmd(args: argparse.Namespace) -> int:
     return 0
 
 
-def _resolve_consumer(args: argparse.Namespace, *, session: str | None) -> str:
-    explicit = getattr(args, "consumer", None)
-    if explicit:
-        return validate_consumer_name(explicit, source="--consumer")
-    return default_consumer(session)
-
-
 def _session_from_mark(root: Path, mark_id: str | None) -> str | None:
     if not mark_id:
         return None
@@ -2667,6 +2604,59 @@ def event_effective_session(root: Path, args: argparse.Namespace) -> str | None:
             raise SystemExit("--all-sessions requires --since-mark")
         return None
     return getattr(args, "session", None) or _session_from_mark(root, getattr(args, "since_mark", None))
+
+
+def print_wait_timeout(
+    root: Path,
+    args: argparse.Namespace,
+    effective_session: str | None,
+    since_created_at: str | None,
+) -> None:
+    """Emit an informative timeout for `events wait`.
+
+    A bare timeout cannot tell a manager whether the worker stalled or simply
+    finished with a different event kind than the one waited on — opposite
+    situations that demand opposite responses (issue #33). So on timeout we
+    report the attention-class events that landed after the cursor, regardless
+    of the (possibly narrower) --kind or --topic being waited on: zero means
+    "nothing actionable yet" (still working or stalled); non-zero means "go
+    read what did land." The scan is intentionally NOT topic-scoped —
+    attention events such as needs_input/permission_request carry no topic, so
+    narrowing the count to the waited --topic would hide exactly the signals
+    worth surfacing and re-introduce the #33 false "stalled" reading.
+    """
+    if args.quiet and not args.json:
+        return
+    scan_kind = None if resolve_kind_default(args.kind) is None else ATTENTION_KINDS
+    after_cursor = list_events(
+        root,
+        session=effective_session,
+        kind=scan_kind,
+        since_created_at=since_created_at,
+    )
+    counts: dict[str, int] = {}
+    for event in after_cursor:
+        kind = str(event.get("kind") or "")
+        counts[kind] = counts.get(kind, 0) + 1
+    if args.json:
+        payload: dict[str, Any] = {
+            "kind": "timeout",
+            "session": effective_session,
+            "events_after_cursor": len(after_cursor),
+            "kinds_after_cursor": counts,
+        }
+        if args.since_mark:
+            payload["since_mark"] = args.since_mark
+        print(json.dumps(payload, sort_keys=True))
+        return
+    if after_cursor:
+        summary = ", ".join(f"{kind}={count}" for kind, count in sorted(counts.items()))
+        print(
+            f"timeout: awaited event not found, but {len(after_cursor)} attention "
+            f"event(s) landed after the cursor ({summary}) — read them"
+        )
+    else:
+        print("timeout: no attention events after the cursor — worker still working or stalled")
 
 
 def events_cmd(args: argparse.Namespace) -> int:
@@ -2710,14 +2700,11 @@ def events_cmd(args: argparse.Namespace) -> int:
     if args.events_action == "list":
         since_created_at = event_cursor_from_args(root, args)
         effective_session = event_effective_session(root, args)
-        consumer = _resolve_consumer(args, session=effective_session) if args.unread else None
         events = list_events(
             root,
             session=effective_session,
             kind=resolve_kind_default(args.kind),
             topic=args.topic,
-            unread=args.unread,
-            consumer=consumer,
             since_created_at=since_created_at,
         )
         if args.limit and len(events) > args.limit:
@@ -2732,7 +2719,8 @@ def events_cmd(args: argparse.Namespace) -> int:
     if args.events_action == "wait":
         since_created_at = event_cursor_from_args(root, args)
         effective_session = event_effective_session(root, args)
-        consumer = _resolve_consumer(args, session=effective_session)
+        # The mark cursor (--since-mark) already excludes earlier-turn events, so
+        # the wait is idempotent: re-running returns the same event (see #33).
         deadline = time.monotonic() + args.timeout
         while True:
             events = list_events(
@@ -2740,40 +2728,18 @@ def events_cmd(args: argparse.Namespace) -> int:
                 session=effective_session,
                 kind=resolve_kind_default(args.kind),
                 topic=args.topic,
-                unread=True,
-                consumer=consumer,
                 since_created_at=since_created_at,
             )
             if events:
                 event = events[0]
-                if args.ack:
-                    ack_event(root, event["id"], consumer)
                 if args.json:
                     event = enrich_event(event)
                 print_event(event, json_output=args.json)
                 return 0
             if time.monotonic() >= deadline:
-                if args.json:
-                    print(json.dumps({"kind": "timeout", "session": effective_session}))
-                elif not args.quiet:
-                    print("timeout waiting for event")
+                print_wait_timeout(root, args, effective_session, since_created_at)
                 return 0
             time.sleep(args.interval)
-
-    if args.events_action == "ack":
-        explicit_consumer = getattr(args, "consumer", None)
-        if explicit_consumer:
-            consumer = validate_consumer_name(explicit_consumer, source="--consumer")
-        else:
-            session = getattr(args, "session", None)
-            if not session:
-                event = load_event_file(events_dir(root) / f"{args.event_id}.json")
-                session = event.get("session") if event else None
-            consumer = default_consumer(session)
-        path = ack_event(root, args.event_id, consumer)
-        print(f"acked: {args.event_id}")
-        print(path)
-        return 0
 
     raise SystemExit(f"unknown events action: {args.events_action}")
 
@@ -3490,7 +3456,7 @@ def parser() -> argparse.ArgumentParser:
     profiles.add_argument("--agent", help="Show one profile")
     profiles.set_defaults(func=profiles_cmd)
 
-    events = command("events", help="Emit, list, wait for, and acknowledge manager-agent events")
+    events = command("events", help="Emit, list, and wait for manager-agent events")
     events_sub = events.add_subparsers(dest="events_action", required=True)
     events_emit = events_sub.add_parser("emit", help="Append a canonical event")
     events_emit.add_argument("--kind", help="Event kind, e.g. agent_stop, needs_input, board_post")
@@ -3513,15 +3479,13 @@ def parser() -> argparse.ArgumentParser:
         ),
     )
     events_list.add_argument("--topic", help="Filter by board/event topic")
-    events_list.add_argument("--unread", action="store_true", help="Only show events not acked by this consumer")
-    events_list.add_argument("--consumer", help="Consumer name for unread filtering")
     events_list.add_argument("--since-mark", help="Only show events created after a transcript mark")
     events_list.add_argument("--all-sessions", action="store_true", help="With --since-mark, include events from any session after that mark")
     events_list.add_argument("--from-now", action="store_true", help="Only show events created after invocation")
     events_list.add_argument("--limit", type=int, default=50)
     events_list.add_argument("--json", action="store_true")
     events_list.set_defaults(func=events_cmd)
-    events_wait = events_sub.add_parser("wait", help="Wait for the next unread event")
+    events_wait = events_sub.add_parser("wait", help="Wait for the next event after the cursor (idempotent)")
     events_wait.add_argument("--session", help="Filter by session")
     events_wait.add_argument(
         "--kind",
@@ -3533,20 +3497,12 @@ def parser() -> argparse.ArgumentParser:
     events_wait.add_argument("--topic", help="Filter by board/event topic")
     events_wait.add_argument("--timeout", type=float, default=1800)
     events_wait.add_argument("--interval", type=float, default=0.5)
-    events_wait.add_argument("--consumer", help="Consumer name for unread filtering")
     events_wait.add_argument("--since-mark", help="Wait only for events created after a transcript mark")
     events_wait.add_argument("--all-sessions", action="store_true", help="With --since-mark, wait for events from any session after that mark")
     events_wait.add_argument("--from-now", action="store_true", help="Wait only for events created after invocation")
-    events_wait.add_argument("--no-ack", dest="ack", action="store_false", help="Do not ack the event (default: ack on return)")
     events_wait.add_argument("--json", action="store_true")
     events_wait.add_argument("--quiet", action="store_true")
-    events_wait.set_defaults(func=events_cmd, ack=True)
-    events_ack = events_sub.add_parser("ack", help="Acknowledge an event for a consumer")
-    events_ack.add_argument("event_id")
-    events_ack.add_argument("--consumer", help="Consumer name")
-    events_ack.add_argument("--session", help="Override session for consumer derivation; otherwise inferred from the event file")
-    events_ack.set_defaults(func=events_cmd)
-
+    events_wait.set_defaults(func=events_cmd)
     board = command("board", help="Append-only message board for durable agent memos")
     board_sub = board.add_subparsers(dest="board_action", required=True)
     board_post = board_sub.add_parser("post", help="Post one immutable Markdown message")
