@@ -10,7 +10,7 @@ If a session is `Dead but registered`, use the printed hint or run:
 agent-tmux launch --session <session>
 ```
 
-This recreates the tmux session from the saved launch intent; it does not restore the old terminal conversation.
+This recreates the tmux session from the saved launch intent and replays the run command, starting the agent **fresh**: it restores neither the old terminal scrollback nor the agent's prior conversation. agent-tmux injects no `--resume`/`--continue` of its own (it replays your saved launch command as-is), and a new timestamped transcript is started, so a recovered session answers your next prompt with no stale context. Treat recovery as a clean restart — task truth comes from board memos and artifacts, not the prior transcript.
 
 ```bash
 agent-tmux report

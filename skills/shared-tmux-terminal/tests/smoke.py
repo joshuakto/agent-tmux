@@ -122,5 +122,25 @@ check(
     json.loads(_out.getvalue()).get("mark") == "m_x",
 )
 
+# --- #28: a recovered session starts CLEAN (does not resume stale context). Two
+# agent-tmux-side guarantees keep recovery clean, both pure-function-checkable:
+# (1) the replayed run command is fresh — claude wiring injects only --settings,
+#     never --resume/--continue, so the recovered agent starts a new conversation;
+# (2) each launch gets a uniquely timestamped log, so recovery never appends to the
+#     prior transcript (a stale read can't leak across a recovery).
+# Verified end-to-end with a real claude worker: after kill+recover, the session
+# answered a fresh prompt and did NOT recall the pre-recovery conversation. ---
+_wired_run, _wired_ok, _ = m.wire_claude_run_command("claude --model claude-haiku-4-5", Path("/tmp/agent-tmux-settings.json"))
+check(
+    "recovery replay is fresh: claude wiring injects only --settings, no --resume/--continue",
+    _wired_ok and "--settings" in _wired_run and "--resume" not in _wired_run and "--continue" not in _wired_run,
+)
+_log_name = m.default_log_file(Path("/tmp/proj"), "w:0.0").name
+_log_stamp = _log_name[len("w-0-0-"):-len(".log")].replace("-", "") if _log_name.startswith("w-0-0-") and _log_name.endswith(".log") else ""
+check(
+    "recovery uses a fresh timestamped log (never appends to the prior transcript)",
+    _log_stamp.isdigit() and len(_log_stamp) == 14,
+)
+
 print(f"\n{len(_failures)} failure(s): {', '.join(_failures)}" if _failures else "\nAll smoke checks passed.")
 sys.exit(1 if _failures else 0)
