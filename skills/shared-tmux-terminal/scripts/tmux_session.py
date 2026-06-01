@@ -2669,6 +2669,59 @@ def event_effective_session(root: Path, args: argparse.Namespace) -> str | None:
     return getattr(args, "session", None) or _session_from_mark(root, getattr(args, "since_mark", None))
 
 
+def print_wait_timeout(
+    root: Path,
+    args: argparse.Namespace,
+    effective_session: str | None,
+    since_created_at: str | None,
+) -> None:
+    """Emit an informative timeout for `events wait`.
+
+    A bare timeout cannot tell a manager whether the worker stalled or simply
+    finished with a different event kind than the one waited on — opposite
+    situations that demand opposite responses (issue #33). So on timeout we
+    report the attention-class events that landed after the cursor, regardless
+    of the (possibly narrower) --kind or --topic being waited on: zero means
+    "nothing actionable yet" (still working or stalled); non-zero means "go
+    read what did land." The scan is intentionally NOT topic-scoped —
+    attention events such as needs_input/permission_request carry no topic, so
+    narrowing the count to the waited --topic would hide exactly the signals
+    worth surfacing and re-introduce the #33 false "stalled" reading.
+    """
+    if args.quiet and not args.json:
+        return
+    scan_kind = None if resolve_kind_default(args.kind) is None else ATTENTION_KINDS
+    after_cursor = list_events(
+        root,
+        session=effective_session,
+        kind=scan_kind,
+        since_created_at=since_created_at,
+    )
+    counts: dict[str, int] = {}
+    for event in after_cursor:
+        kind = str(event.get("kind") or "")
+        counts[kind] = counts.get(kind, 0) + 1
+    if args.json:
+        payload: dict[str, Any] = {
+            "kind": "timeout",
+            "session": effective_session,
+            "events_after_cursor": len(after_cursor),
+            "kinds_after_cursor": counts,
+        }
+        if args.since_mark:
+            payload["since_mark"] = args.since_mark
+        print(json.dumps(payload, sort_keys=True))
+        return
+    if after_cursor:
+        summary = ", ".join(f"{kind}={count}" for kind, count in sorted(counts.items()))
+        print(
+            f"timeout: awaited event not found, but {len(after_cursor)} attention "
+            f"event(s) landed after the cursor ({summary}) — read them"
+        )
+    else:
+        print("timeout: no attention events after the cursor — worker still working or stalled")
+
+
 def events_cmd(args: argparse.Namespace) -> int:
     root = project_root(Path(args.cwd) if args.cwd else None)
     socket = socket_path(root, getattr(args, "socket", None))
@@ -2732,7 +2785,14 @@ def events_cmd(args: argparse.Namespace) -> int:
     if args.events_action == "wait":
         since_created_at = event_cursor_from_args(root, args)
         effective_session = event_effective_session(root, args)
-        consumer = _resolve_consumer(args, session=effective_session)
+        # The mark cursor (--since-mark) already excludes earlier-turn events, so
+        # the default wait is idempotent: it neither consults nor mutates ack
+        # state. --unread/--ack opt into drain-style consumption (see #33).
+        consumer = (
+            _resolve_consumer(args, session=effective_session)
+            if (args.unread or args.ack)
+            else None
+        )
         deadline = time.monotonic() + args.timeout
         while True:
             events = list_events(
@@ -2740,7 +2800,7 @@ def events_cmd(args: argparse.Namespace) -> int:
                 session=effective_session,
                 kind=resolve_kind_default(args.kind),
                 topic=args.topic,
-                unread=True,
+                unread=args.unread,
                 consumer=consumer,
                 since_created_at=since_created_at,
             )
@@ -2753,10 +2813,7 @@ def events_cmd(args: argparse.Namespace) -> int:
                 print_event(event, json_output=args.json)
                 return 0
             if time.monotonic() >= deadline:
-                if args.json:
-                    print(json.dumps({"kind": "timeout", "session": effective_session}))
-                elif not args.quiet:
-                    print("timeout waiting for event")
+                print_wait_timeout(root, args, effective_session, since_created_at)
                 return 0
             time.sleep(args.interval)
 
@@ -3521,7 +3578,7 @@ def parser() -> argparse.ArgumentParser:
     events_list.add_argument("--limit", type=int, default=50)
     events_list.add_argument("--json", action="store_true")
     events_list.set_defaults(func=events_cmd)
-    events_wait = events_sub.add_parser("wait", help="Wait for the next unread event")
+    events_wait = events_sub.add_parser("wait", help="Wait for the next event after the cursor (idempotent; does not ack by default)")
     events_wait.add_argument("--session", help="Filter by session")
     events_wait.add_argument(
         "--kind",
@@ -3533,14 +3590,15 @@ def parser() -> argparse.ArgumentParser:
     events_wait.add_argument("--topic", help="Filter by board/event topic")
     events_wait.add_argument("--timeout", type=float, default=1800)
     events_wait.add_argument("--interval", type=float, default=0.5)
-    events_wait.add_argument("--consumer", help="Consumer name for unread filtering")
+    events_wait.add_argument("--consumer", help="Consumer name for --unread/--ack filtering")
     events_wait.add_argument("--since-mark", help="Wait only for events created after a transcript mark")
     events_wait.add_argument("--all-sessions", action="store_true", help="With --since-mark, wait for events from any session after that mark")
     events_wait.add_argument("--from-now", action="store_true", help="Wait only for events created after invocation")
-    events_wait.add_argument("--no-ack", dest="ack", action="store_false", help="Do not ack the event (default: ack on return)")
+    events_wait.add_argument("--unread", action="store_true", help="Only consider events not acked by this consumer (opt-in; default considers all events after the cursor, so repeated waits are idempotent)")
+    events_wait.add_argument("--ack", action="store_true", help="Ack the returned event (opt-in; with --unread, enables drain-style progress across repeated waits)")
     events_wait.add_argument("--json", action="store_true")
     events_wait.add_argument("--quiet", action="store_true")
-    events_wait.set_defaults(func=events_cmd, ack=True)
+    events_wait.set_defaults(func=events_cmd)
     events_ack = events_sub.add_parser("ack", help="Acknowledge an event for a consumer")
     events_ack.add_argument("event_id")
     events_ack.add_argument("--consumer", help="Consumer name")
