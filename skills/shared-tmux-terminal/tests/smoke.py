@@ -9,8 +9,9 @@ them fails loudly instead of silently breaking the loop.
 """
 from __future__ import annotations
 
+import contextlib
 import importlib.util
-import inspect
+import io
 import json
 import subprocess
 import sys
@@ -71,14 +72,22 @@ with tempfile.TemporaryDirectory() as d:
     check("prompt has --report-back-topic, dropped --print-mark/--quiet", "--report-back-topic" in ph and "--print-mark" not in ph and "--quiet" not in ph)
     check("launch has --json", "--json" in helptext("launch", cwd=d))
 
-# --- stdout-capture contract: id-producing commands print a bare, capturable id
-# on stdout (receipt to stderr), so MARK=$(...) works with no --json/jq. prompt
-# established this; mark must match it or the standalone-mark path breaks silently. ---
-mark_src = inspect.getsource(m.mark_cmd)
-mark_else = mark_src.split("else:", 1)[-1]
+# --- stdout-capture contract (behavioral): emit_capturable_id() — shared by prompt
+# and mark — must put the bare id on stdout (so MARK=$(...) captures just it) and the
+# receipt on stderr; with --json, the full receipt on stdout. ---
+_out, _err = io.StringIO(), io.StringIO()
+with contextlib.redirect_stdout(_out), contextlib.redirect_stderr(_err):
+    m.emit_capturable_id("m_x", {"mark": "m_x"}, "mark created: target=t", as_json=False)
 check(
-    "mark prints bare id on stdout, receipt to stderr (matches prompt)",
-    "print(mark_id)" in mark_else and "file=sys.stderr" in mark_else,
+    "emit_capturable_id: bare id on stdout, receipt on stderr",
+    _out.getvalue().strip() == "m_x" and "mark created" in _err.getvalue() and "mark created" not in _out.getvalue(),
+)
+_out = io.StringIO()
+with contextlib.redirect_stdout(_out):
+    m.emit_capturable_id("m_x", {"mark": "m_x", "target": "t"}, "ignored", as_json=True)
+check(
+    "emit_capturable_id --json: full receipt on stdout",
+    json.loads(_out.getvalue()).get("mark") == "m_x",
 )
 
 print(f"\n{len(_failures)} failure(s): {', '.join(_failures)}" if _failures else "\nAll smoke checks passed.")
