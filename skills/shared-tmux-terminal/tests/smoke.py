@@ -160,5 +160,32 @@ finally:
     m.main = _orig_main
 check("run_cli converts BrokenPipeError to clean exit 0", _rc == 0)
 
+
+# run_cli must ALSO flush stdout inside its try on the success path: a small
+# buffered payload whose reader has already closed must raise EPIPE here (handled)
+# instead of as an "Exception ignored ... BrokenPipeError" at interpreter shutdown.
+# The monkeypatch above only covers the raise-during-dispatch path; this covers the
+# (e2e-discovered, otherwise racy) shutdown-flush path. ---
+class _FlushSpy:
+    def __init__(self) -> None:
+        self.flushed = False
+
+    def write(self, s: str) -> int:
+        return len(s)
+
+    def flush(self) -> None:
+        self.flushed = True
+
+
+_spy = _FlushSpy()
+_orig_stdout, _orig_main2 = sys.stdout, m.main
+m.main = lambda: 0
+sys.stdout = _spy
+try:
+    _rc2 = m.run_cli()
+finally:
+    sys.stdout, m.main = _orig_stdout, _orig_main2
+check("run_cli flushes stdout on the success path (closes the shutdown-flush EPIPE race)", _spy.flushed and _rc2 == 0)
+
 print(f"\n{len(_failures)} failure(s): {', '.join(_failures)}" if _failures else "\nAll smoke checks passed.")
 sys.exit(1 if _failures else 0)

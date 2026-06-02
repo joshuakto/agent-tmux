@@ -3639,7 +3639,13 @@ def main() -> int:
 
 def run_cli() -> int:
     try:
-        return main()
+        rc = main()
+        # Flush inside the try so a buffered-stdout EPIPE — reader already gone,
+        # output too small to have flushed mid-run — is raised and handled here
+        # rather than leaking as an "Exception ignored ... BrokenPipeError" at
+        # interpreter shutdown (which the except below cannot intercept).
+        sys.stdout.flush()
+        return rc
     except BrokenPipeError:
         # The reader closed the pipe early (e.g. `agent-tmux report | head`).
         # Match standard CLI behavior: exit cleanly with no traceback. Point
