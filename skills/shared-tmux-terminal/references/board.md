@@ -13,6 +13,7 @@ agent-tmux board read <message-id>
 ```
 
 `board post` writes one immutable Markdown file and emits a `board_post` event.
+Like `prompt` and `mark`, it prints the bare `message_id` on stdout (the human receipt — topic, path, read command — goes to stderr), so `MSGID=$(agent-tmux board post …)` captures just the id and `agent-tmux board read "$MSGID"` round-trips. Pass `--json` for the full record on stdout.
 In that event, `from` is the poster and `agent` is the session's terminal-agent profile when known.
 When run inside a managed tmux pane, it infers the poster and session from that pane. Outside a managed pane, pass `--from <name>`. Use `--session` only when posting from outside the pane or overriding the association.
 For long memos, prefer `--body-file` or stdin over a shell-quoted one-liner.
