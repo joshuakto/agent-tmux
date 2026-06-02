@@ -129,7 +129,7 @@ claude --plugin-dir ~/.agent-tmux
 
 Inside Claude Code, the skill is available as `/agent-tmux:shared-tmux-terminal`. Claude can also invoke it automatically when the request matches the skill description. The plugin `bin/` directory is added to Claude Code's Bash tool `PATH` while the plugin is enabled, so `agent-tmux` is available to the agent.
 
-For shared installation, add this repository as a Claude Code plugin marketplace or install it as a project/personal skill by copying `skills/shared-tmux-terminal` into `.claude/skills/` or `~/.claude/skills/`.
+For shared installation, install it as a project/personal skill by copying `skills/shared-tmux-terminal` into `.claude/skills/` or `~/.claude/skills/`.
 
 ## Codex Skill
 
