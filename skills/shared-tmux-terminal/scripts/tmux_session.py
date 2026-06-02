@@ -12,6 +12,7 @@ import re
 import select
 import shlex
 import shutil
+import signal
 import subprocess
 import sys
 import time
@@ -3637,25 +3638,20 @@ def main() -> int:
         return 2
 
 
-def run_cli() -> int:
-    try:
-        rc = main()
-        # Flush inside the try so a buffered-stdout EPIPE — reader already gone,
-        # output too small to have flushed mid-run — is raised and handled here
-        # rather than leaking as an "Exception ignored ... BrokenPipeError" at
-        # interpreter shutdown (which the except below cannot intercept).
-        sys.stdout.flush()
-        return rc
-    except BrokenPipeError:
-        # The reader closed the pipe early (e.g. `agent-tmux report | head`).
-        # Match standard CLI behavior: exit cleanly with no traceback. Point
-        # stdout at /dev/null so the interpreter's final flush on shutdown does
-        # not re-raise. Agents pipe capture output constantly; a stack trace
-        # here is noise that looks like a tool failure.
-        with contextlib.suppress(Exception):
-            os.dup2(os.open(os.devnull, os.O_WRONLY), sys.stdout.fileno())
-        return 0
+def restore_default_sigpipe() -> None:
+    """Behave like a standard Unix filter when a reader closes the pipe early.
+
+    Python installs SIG_IGN for SIGPIPE at startup, so writing to a pipe whose
+    reader has gone (e.g. `agent-tmux report | head`) raises BrokenPipeError and,
+    if unhandled, dumps a traceback that reads as a tool failure — pure noise for
+    an agent that pipes capture output constantly. Restoring the OS default lets
+    the kernel terminate us on SIGPIPE instead (exit 141, like cat/grep): there is
+    no exception to catch, and it covers mid-run and shutdown-flush writes alike.
+    """
+    with contextlib.suppress(AttributeError, ValueError):  # no SIGPIPE on Windows / off main thread
+        signal.signal(signal.SIGPIPE, signal.SIG_DFL)
 
 
 if __name__ == "__main__":
-    raise SystemExit(run_cli())
+    restore_default_sigpipe()
+    raise SystemExit(main())
