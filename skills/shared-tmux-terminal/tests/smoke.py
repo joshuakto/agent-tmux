@@ -142,50 +142,20 @@ check(
     _log_stamp.isdigit() and len(_log_stamp) == 14,
 )
 
-# --- broken-pipe guard: closing the reader (e.g. `agent-tmux report | head`)
-# must exit 0 with no traceback, not crash with BrokenPipeError. run_cli()
-# converts a BrokenPipeError raised anywhere in dispatch into a clean exit. ---
-def _boom():
-    raise BrokenPipeError()
+# --- broken-pipe guard: a reader closing early (e.g. `agent-tmux report | head`)
+# must not dump a BrokenPipeError traceback. The CLI entry calls
+# restore_default_sigpipe(), resetting SIGPIPE to SIG_DFL so the kernel terminates
+# us cleanly (like cat/grep) instead — covering mid-run and shutdown-flush writes
+# uniformly, with no exception to catch. Assert the disposition it installs. ---
+import signal
 
-
-_orig_main = m.main
-m.main = _boom
-try:
-    # redirect_stdout points sys.stdout at a StringIO (no real fd), so run_cli's
-    # devnull dup2 is harmlessly suppressed and the test's own stdout survives.
-    with contextlib.redirect_stdout(io.StringIO()):
-        _rc = m.run_cli()
-finally:
-    m.main = _orig_main
-check("run_cli converts BrokenPipeError to clean exit 0", _rc == 0)
-
-
-# run_cli must ALSO flush stdout inside its try on the success path: a small
-# buffered payload whose reader has already closed must raise EPIPE here (handled)
-# instead of as an "Exception ignored ... BrokenPipeError" at interpreter shutdown.
-# The monkeypatch above only covers the raise-during-dispatch path; this covers the
-# (e2e-discovered, otherwise racy) shutdown-flush path. ---
-class _FlushSpy:
-    def __init__(self) -> None:
-        self.flushed = False
-
-    def write(self, s: str) -> int:
-        return len(s)
-
-    def flush(self) -> None:
-        self.flushed = True
-
-
-_spy = _FlushSpy()
-_orig_stdout, _orig_main2 = sys.stdout, m.main
-m.main = lambda: 0
-sys.stdout = _spy
-try:
-    _rc2 = m.run_cli()
-finally:
-    sys.stdout, m.main = _orig_stdout, _orig_main2
-check("run_cli flushes stdout on the success path (closes the shutdown-flush EPIPE race)", _spy.flushed and _rc2 == 0)
+_prev_sigpipe = signal.getsignal(signal.SIGPIPE)
+m.restore_default_sigpipe()
+check(
+    "restore_default_sigpipe resets SIGPIPE to SIG_DFL (closed-pipe writes terminate like cat/grep, no traceback)",
+    signal.getsignal(signal.SIGPIPE) == signal.SIG_DFL,
+)
+signal.signal(signal.SIGPIPE, _prev_sigpipe)  # restore so the rest of this test process is unaffected
 
 print(f"\n{len(_failures)} failure(s): {', '.join(_failures)}" if _failures else "\nAll smoke checks passed.")
 sys.exit(1 if _failures else 0)
