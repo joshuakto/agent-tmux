@@ -72,6 +72,23 @@ with tempfile.TemporaryDirectory() as d:
     check("prompt has --report-back-topic, dropped --print-mark/--quiet", "--report-back-topic" in ph and "--print-mark" not in ph and "--quiet" not in ph)
     check("launch has --json", "--json" in helptext("launch", cwd=d))
 
+    # --- board post shares the prompt/mark stdout-capture contract: the bare
+    # message_id on stdout (so MSGID=$(board post …) round-trips through board read),
+    # the human receipt on stderr, the full record on stdout with --json. A multi-line
+    # stdout receipt here silently corrupts the captured id. ---
+    bp = run("board", "post", "--topic", "t", "--from", "tester", "hello body", cwd=d)
+    _msgid = bp.stdout.strip()
+    check(
+        "board post: bare message_id on stdout, receipt on stderr",
+        bp.returncode == 0 and _msgid.startswith("msg_") and "\n" not in _msgid and "posted:" in bp.stderr,
+    )
+    check(
+        "board post: captured id round-trips through board read",
+        run("board", "read", _msgid, cwd=d).returncode == 0,
+    )
+    bpj = run("board", "post", "--topic", "t", "--from", "tester", "json body", "--json", cwd=d)
+    check("board post --json: full record on stdout", json.loads(bpj.stdout).get("message_id", "").startswith("msg_"))
+
 # --- #33: events wait is idempotent (the mark cursor is the sole dedup) and its
 # timeout is informative. Guards the manager-loop contract: a repeated wait must
 # not turn a real event into a misleading "stalled" timeout. ---

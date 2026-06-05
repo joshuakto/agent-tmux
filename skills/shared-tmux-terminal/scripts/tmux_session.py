@@ -2813,18 +2813,18 @@ def board_cmd(args: argparse.Namespace) -> int:
                 "path": str(path),
             },
         )
-        if getattr(args, "json", False):
-            record: dict[str, Any] = {"message_id": message_id, "topic": args.topic, "path": str(path), "read_command": read_command}
-            if session:
-                record["session"] = session
-            print(json.dumps(record, sort_keys=True))
-        else:
-            print(f"posted: {message_id}")
-            print(f"topic: {args.topic}")
-            if session:
-                print(f"session: {session}")
-            print(f"path: {path}")
-            print(f"read: {read_command}")
+        record: dict[str, Any] = {"message_id": message_id, "topic": args.topic, "path": str(path), "read_command": read_command}
+        if session:
+            record["session"] = session
+        # Same stdout-capture contract as prompt/mark: the bare message_id on stdout
+        # (so MSGID=$(board post …) captures just it), the human receipt on stderr,
+        # the full record on stdout with --json.
+        session_part = f" session={session}" if session else ""
+        receipt_line = f"posted: {message_id} topic={args.topic}{session_part}"
+        emit_capturable_id(
+            message_id, record, receipt_line, as_json=getattr(args, "json", False),
+            extra_stderr=(f"path: {path}", f"read: {read_command}"),
+        )
         return 0
 
     if args.board_action == "list":
